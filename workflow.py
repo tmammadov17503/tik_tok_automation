@@ -65,6 +65,14 @@ def whisper_command() -> list[str] | None:
     return None
 
 
+def openai_transcription_available() -> bool:
+    return bool(os.getenv("OPENAI_API_KEY")) and _module_exists("openai")
+
+
+def openai_transcription_model() -> str:
+    return os.getenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1").strip() or "whisper-1"
+
+
 def yt_dlp_js_args() -> list[str]:
     if shutil.which("node"):
         args = ["--js-runtimes", "node"]
@@ -103,6 +111,7 @@ def detect_tools() -> dict[str, bool]:
         "ffprobe": shutil.which("ffprobe") is not None,
         "yt_dlp": yt_dlp_command() is not None,
         "whisper": whisper_command() is not None,
+        "openai_transcription": openai_transcription_available(),
     }
 
 
@@ -1315,9 +1324,16 @@ class WorkflowPipeline:
             segment = clip["segment_obj"]
 
             subtitle_path: Path | None = None
-            subtitle_label = "Whisper"
+            subtitle_label = "source"
 
-            if whisper is not None:
+            if subtitle_entries:
+                fallback_subtitle_path = job_dir / f"{clip_path.stem}.srt"
+                written = self._write_segment_subtitles(subtitle_entries, segment, fallback_subtitle_path)
+                if written:
+                    subtitle_path = fallback_subtitle_path
+
+            if subtitle_path is None and whisper is not None:
+                subtitle_label = "Whisper"
                 job.log(f"Transcribing highlight {index} with Whisper ({request['whisper_model']}).")
                 transcribe_command = whisper + [
                     str(clip_path),
@@ -1358,12 +1374,9 @@ class WorkflowPipeline:
                     if subtitle_path.exists():
                         self._stylize_subtitle_file(subtitle_path, str(request.get("language") or "auto"))
 
-            if subtitle_path is None and subtitle_entries:
-                fallback_subtitle_path = job_dir / f"{clip_path.stem}.srt"
-                written = self._write_segment_subtitles(subtitle_entries, segment, fallback_subtitle_path)
-                if written:
-                    subtitle_path = fallback_subtitle_path
-                    subtitle_label = "source"
+            if subtitle_path is None and openai_transcription_available():
+                subtitle_label = "OpenAI"
+                subtitle_path = self._transcribe_clip_with_openai(job, clip_path, segment, request, job_dir)
 
             if subtitle_path is None or not subtitle_path.exists():
                 job.log(f"No subtitle file produced for {clip_path.name}; keeping plain clip.")
@@ -1511,6 +1524,100 @@ class WorkflowPipeline:
             "+faststart",
             str(output_path),
         ]
+
+    def _transcribe_clip_with_openai(
+        self,
+        job: Any,
+        clip_path: Path,
+        segment: Segment,
+        request: dict[str, Any],
+        job_dir: Path,
+    ) -> Path | None:
+        ffmpeg = ffmpeg_command()
+        if ffmpeg is None:
+            return None
+
+        audio_path = job_dir / f"{clip_path.stem}_audio.mp3"
+        subtitle_path = job_dir / f"{clip_path.stem}.srt"
+        extract_command = ffmpeg + [
+            "-y",
+            "-i",
+            str(clip_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-b:a",
+            "64k",
+            str(audio_path),
+        ]
+
+        try:
+            run_command(extract_command)
+        except Exception as exc:
+            job.log(f"OpenAI transcription audio extract failed for {clip_path.name}: {exc}")
+            return None
+
+        if not audio_path.exists() or audio_path.stat().st_size <= 0:
+            job.log(f"OpenAI transcription skipped for {clip_path.name}: no audio was extracted.")
+            return None
+
+        if audio_path.stat().st_size > 24 * 1024 * 1024:
+            job.log(f"OpenAI transcription skipped for {clip_path.name}: audio file is larger than 24 MB.")
+            return None
+
+        try:
+            from openai import OpenAI
+
+            client = OpenAI()
+            model = openai_transcription_model()
+            params: dict[str, Any] = {
+                "file": audio_path.open("rb"),
+                "model": model,
+                "response_format": "srt" if model == "whisper-1" else "text",
+            }
+            language = str(request.get("language") or "auto").strip().lower()
+            if language and language != "auto":
+                params["language"] = language
+
+            job.log(f"Transcribing highlight with OpenAI ({model}).")
+            try:
+                response = client.audio.transcriptions.create(**params)
+            finally:
+                params["file"].close()
+        except Exception as exc:
+            job.log(f"OpenAI transcription failed for {clip_path.name}: {exc}")
+            return None
+
+        if isinstance(response, str):
+            transcript = response
+        elif hasattr(response, "text"):
+            transcript = str(response.text)
+        else:
+            transcript = str(response)
+
+        transcript = transcript.strip()
+        if not transcript:
+            return None
+
+        if "-->" in transcript:
+            subtitle_path.write_text(transcript + "\n", encoding="utf-8")
+        else:
+            subtitle_path.write_text(
+                "\n".join(
+                    [
+                        "1",
+                        f"{seconds_to_srt_time(0)} --> {seconds_to_srt_time(max(1.0, segment.duration))}",
+                        clean_caption_text(transcript),
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+        self._stylize_subtitle_file(subtitle_path, str(request.get("language") or "auto"))
+        return subtitle_path
 
     def _build_metadata(
         self,

@@ -82,9 +82,13 @@ TIKTOK_MAX_PENDING_SHARES=5
 TIKTOK_UPLOAD_MAX_ATTEMPTS=4
 VIDEO_AGENT_BASIC_AUTH_USER=admin
 VIDEO_AGENT_BASIC_AUTH_PASSWORD=choose-a-long-password
+OPENAI_API_KEY=optional-for-transcription-fallback
+OPENAI_TRANSCRIBE_MODEL=whisper-1
 ```
 
 TikTok limits pending inbox shares, so the worker now pauses uploads when the remote pending count reaches the cap. Failed temporary uploads are returned to the queue with backoff instead of staying stuck as `uploading`.
+
+Source subtitles are used first because they are free and already timestamped. If a source has no subtitles and `OPENAI_API_KEY` is set, the worker extracts audio from each rendered clip and uses the OpenAI transcription API to create captions. Local Whisper remains optional for powerful local machines, but it is not installed by default on small servers.
 
 ## Non-Docker Deploy
 

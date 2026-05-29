@@ -13,6 +13,8 @@ The worker does not use Sora. It processes existing approved source videos:
 source URL -> yt-dlp -> highlight selection -> ffmpeg vertical clips -> captions -> TikTok inbox
 ```
 
+Captions use source subtitles first. If no source subtitles are available, the remote worker can use OpenAI transcription when `OPENAI_API_KEY` is configured.
+
 ## Local Run
 
 ```powershell
