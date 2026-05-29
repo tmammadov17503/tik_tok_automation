@@ -275,6 +275,35 @@ h1 {
   box-shadow: none;
 }
 
+.qr-panel {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255, 253, 248, 0.95), rgba(242, 230, 212, 0.9));
+}
+
+.qr-content {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+}
+
+.qr-content h3,
+.qr-content p {
+  margin: 0 0 8px;
+}
+
+.qr-image {
+  width: 180px;
+  height: 180px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+}
+
 .node-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr) 24px minmax(0, 1fr);
@@ -452,6 +481,7 @@ a {
   .hero,
   .board,
   .results-grid,
+  .qr-content,
   .node-row {
     grid-template-columns: 1fr;
   }

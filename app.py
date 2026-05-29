@@ -8,15 +8,16 @@ import os
 import secrets
 import threading
 import uuid
-from base64 import b64decode
+from base64 import b64decode, b64encode
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from tiktok_automation import AutomationController
@@ -316,6 +317,8 @@ class TikTokAuthManager:
     TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
     REVOKE_URL = "https://open.tiktokapis.com/v2/oauth/revoke/"
     USER_INFO_URL = "https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name,avatar_url"
+    QR_GET_URL = "https://open.tiktokapis.com/v2/oauth/get_qrcode/"
+    QR_CHECK_URL = "https://open.tiktokapis.com/v2/oauth/check_qrcode/"
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -452,6 +455,105 @@ class TikTokAuthManager:
             params["code_challenge_method"] = "S256"
         return f"{self.AUTHORIZE_URL}?{urlencode(params)}"
 
+    def start_qr_authorization(self) -> dict[str, Any]:
+        config = self.load_config()
+        missing = [name for name in ("client_key", "client_secret") if not config.get(name)]
+        if missing:
+            raise ValueError(f"Save TikTok settings first: missing {', '.join(missing)}.")
+
+        state = secrets.token_urlsafe(24)
+        client_ticket = secrets.token_urlsafe(24)
+        response = self._post_form(
+            self.QR_GET_URL,
+            {
+                "client_key": config["client_key"],
+                "scope": config["scopes"],
+                "state": state,
+            },
+        )
+        if response.get("error"):
+            raise RuntimeError(response.get("error_description") or response["error"])
+
+        qr_token = str(response.get("token") or "").strip()
+        scan_url = str(response.get("scan_qrcode_url") or "").strip()
+        if not qr_token or not scan_url:
+            raise RuntimeError("TikTok did not return a QR authorization token.")
+
+        scan_url = self._set_query_value(scan_url, "client_ticket", client_ticket)
+        pending = {
+            "state": state,
+            "flow": "qr",
+            "created_at": utc_now(),
+            "qr_token": qr_token,
+            "client_ticket": client_ticket,
+            "scope": config["scopes"],
+        }
+        self._write_json_file(self.pending_path, pending)
+
+        return {
+            "status": "new",
+            "message": "Scan this QR code with the TikTok app, then confirm access on your phone.",
+            "qr_data_url": self._make_qr_data_url(scan_url),
+            "scopes": config["scopes"],
+        }
+
+    def check_qr_authorization(self) -> dict[str, Any]:
+        pending = self._read_json_file(self.pending_path)
+        if pending.get("flow") != "qr":
+            return {"status": "not_started", "message": "Start QR connect first."}
+
+        config = self.load_config()
+        response = self._post_form(
+            self.QR_CHECK_URL,
+            {
+                "client_key": config["client_key"],
+                "client_secret": config["client_secret"],
+                "token": str(pending.get("qr_token") or ""),
+            },
+        )
+        if response.get("error"):
+            raise RuntimeError(response.get("error_description") or response["error"])
+
+        status = str(response.get("status") or "").strip() or "unknown"
+        if status in {"new", "scanned"}:
+            return {
+                "status": status,
+                "message": "Waiting for confirmation in the TikTok app."
+                if status == "scanned"
+                else "Waiting for QR scan.",
+            }
+        if status == "expired":
+            self._delete_file(self.pending_path)
+            return {"status": "expired", "message": "QR code expired. Start QR connect again."}
+        if status == "utilised":
+            return {"status": "utilised", "message": "This QR code was already used."}
+        if status != "confirmed":
+            return {"status": status, "message": f"TikTok returned QR status: {status}."}
+
+        if response.get("client_ticket") != pending.get("client_ticket"):
+            self._delete_file(self.pending_path)
+            raise RuntimeError("TikTok QR ticket check failed. Start QR connect again.")
+
+        code, redirect_uri = self._extract_qr_code(response)
+        if not code:
+            raise RuntimeError("TikTok confirmed the QR code but did not return an authorization code.")
+
+        payload = self._exchange_code_for_token(
+            config=config,
+            code=code,
+            redirect_uri=redirect_uri or config.get("redirect_uri") or "",
+            allow_without_redirect_uri=True,
+        )
+        profile = self.fetch_profile(str(payload.get("access_token") or ""))
+        payload["profile"] = profile
+        self._write_json_file(self.token_path, payload)
+        self._delete_file(self.pending_path)
+        return {
+            "status": "connected",
+            "message": "TikTok account connected.",
+            "profile": profile,
+        }
+
     def disconnect(self) -> None:
         config = self.load_config()
         tokens = self._read_json_file(self.token_path)
@@ -526,20 +628,12 @@ class TikTokAuthManager:
             raise RuntimeError("TikTok state check failed. Start the connect flow again.")
 
         config = self.load_config()
-        token_payload = {
-            "client_key": config["client_key"],
-            "client_secret": config["client_secret"],
-            "code": code,
-            "grant_type": "authorization_code",
-            "redirect_uri": config["redirect_uri"],
-        }
-        code_verifier = str(pending.get("code_verifier") or "")
-        if code_verifier:
-            token_payload["code_verifier"] = code_verifier
-
-        response = self._post_form(self.TOKEN_URL, token_payload)
-
-        payload = self._normalize_token_response(response)
+        payload = self._exchange_code_for_token(
+            config=config,
+            code=code,
+            redirect_uri=config["redirect_uri"],
+            code_verifier=str(pending.get("code_verifier") or ""),
+        )
         profile = self.fetch_profile(str(payload.get("access_token") or ""))
         payload["profile"] = profile
         self._write_json_file(self.token_path, payload)
@@ -574,6 +668,78 @@ class TikTokAuthManager:
             },
             data=body,
         )
+
+    def _exchange_code_for_token(
+        self,
+        *,
+        config: dict[str, str],
+        code: str,
+        redirect_uri: str,
+        code_verifier: str = "",
+        allow_without_redirect_uri: bool = False,
+    ) -> dict[str, Any]:
+        token_payload = {
+            "client_key": config["client_key"],
+            "client_secret": config["client_secret"],
+            "code": code,
+            "grant_type": "authorization_code",
+        }
+        if redirect_uri:
+            token_payload["redirect_uri"] = redirect_uri
+        if code_verifier:
+            token_payload["code_verifier"] = code_verifier
+
+        response = self._post_form(self.TOKEN_URL, token_payload)
+        description = str(response.get("error_description") or response.get("error") or "").lower()
+        if (
+            allow_without_redirect_uri
+            and token_payload.get("redirect_uri")
+            and response.get("error")
+            and ("redirect" in description or "malformed" in description)
+        ):
+            token_payload.pop("redirect_uri", None)
+            response = self._post_form(self.TOKEN_URL, token_payload)
+        return self._normalize_token_response(response)
+
+    def _extract_qr_code(self, response: dict[str, Any]) -> tuple[str, str]:
+        code = str(response.get("code") or "").strip()
+        redirect_uri = str(response.get("redirect_uri") or "").strip()
+        if code.startswith("http://") or code.startswith("https://"):
+            redirect_uri = code
+            code = ""
+        if redirect_uri:
+            parsed = urlparse(redirect_uri)
+            values = parse_qs(parsed.query)
+            code = code or self._first_query_value(values, "code") or ""
+            redirect_uri = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+        return code, redirect_uri
+
+    def _set_query_value(self, url: str, key: str, value: str) -> str:
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        query[key] = [value]
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                urlencode(query, doseq=True),
+                parsed.fragment,
+            )
+        )
+
+    def _make_qr_data_url(self, value: str) -> str:
+        try:
+            import qrcode
+            import qrcode.image.svg
+        except ImportError as exc:
+            raise RuntimeError("Install the qrcode package to use TikTok QR connect.") from exc
+
+        image = qrcode.make(value, image_factory=qrcode.image.svg.SvgPathImage)
+        buffer = BytesIO()
+        image.save(buffer)
+        return "data:image/svg+xml;base64," + b64encode(buffer.getvalue()).decode("ascii")
 
     def _normalize_scopes(self, raw: str) -> str:
         scopes = [item.strip() for item in raw.replace(" ", "").split(",") if item.strip()]
@@ -682,6 +848,12 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/tiktok/status":
             self._send_json(TIKTOK.status())
             return
+        if path == "/api/tiktok/qr/status":
+            try:
+                self._send_json(TIKTOK.check_qr_authorization())
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
         if path == "/api/sources":
             self._send_json({"sources": SOURCES.list_sources()})
             return
@@ -733,6 +905,13 @@ class AppHandler(BaseHTTPRequestHandler):
             try:
                 authorize_url = TIKTOK.build_authorize_url()
                 self._send_json({"authorize_url": authorize_url})
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        if parsed.path == "/api/tiktok/qr/start":
+            try:
+                self._send_json(TIKTOK.start_qr_authorization())
             except Exception as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return

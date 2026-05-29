@@ -8,7 +8,9 @@ const runButton = document.getElementById("run-button");
 const tiktokSummary = document.getElementById("tiktok-summary");
 const tiktokForm = document.getElementById("tiktok-form");
 const tiktokConnectButton = document.getElementById("tiktok-connect");
+const tiktokQrConnectButton = document.getElementById("tiktok-qr-connect");
 const tiktokDisconnectButton = document.getElementById("tiktok-disconnect");
+const tiktokQrPanel = document.getElementById("tiktok-qr-panel");
 const sourceForm = document.getElementById("source-form");
 const sourceList = document.getElementById("source-list");
 const automationSummary = document.getElementById("automation-summary");
@@ -19,6 +21,8 @@ const automationRunButton = document.getElementById("automation-run");
 let activeJobId = null;
 let pollHandle = null;
 let automationPollHandle = null;
+let tiktokQrPollHandle = null;
+let currentTikTokQrDataUrl = "";
 
 function createStatusPill(name, enabled) {
   const item = document.createElement("div");
@@ -490,11 +494,90 @@ async function connectTikTok() {
   window.location.href = data.authorize_url;
 }
 
+function renderTikTokQrPanel(data) {
+  tiktokQrPanel.hidden = false;
+  if (data.qr_data_url) {
+    currentTikTokQrDataUrl = data.qr_data_url;
+  }
+  if (data.status === "expired" || data.status === "connected") {
+    currentTikTokQrDataUrl = "";
+  }
+  const message = escapeHtml(data.message || "Scan the QR code with TikTok.");
+  const status = escapeHtml(data.status || "waiting");
+  const qrImage = currentTikTokQrDataUrl
+    ? `<img class="qr-image" src="${escapeHtml(currentTikTokQrDataUrl)}" alt="TikTok QR authorization code">`
+    : "";
+  tiktokQrPanel.innerHTML = `
+    <div class="qr-content">
+      ${qrImage}
+      <div>
+        <h3>TikTok QR connect</h3>
+        <p>${message}</p>
+        <p class="mini-line">Status: ${status}</p>
+      </div>
+    </div>
+  `;
+}
+
+function stopTikTokQrPolling() {
+  if (tiktokQrPollHandle) {
+    window.clearInterval(tiktokQrPollHandle);
+    tiktokQrPollHandle = null;
+  }
+}
+
+async function pollTikTokQr() {
+  const response = await fetch("/api/tiktok/qr/status");
+  const data = await response.json();
+  if (!response.ok) {
+    stopTikTokQrPolling();
+    tiktokQrPanel.hidden = false;
+    tiktokQrPanel.innerHTML = `<p>QR connect failed: ${escapeHtml(data.error || "Unknown error")}</p>`;
+    return;
+  }
+
+  renderTikTokQrPanel(data);
+  if (["connected", "expired", "utilised", "not_started"].includes(data.status)) {
+    stopTikTokQrPolling();
+  }
+  if (data.status === "connected") {
+    await loadTikTokStatus();
+  }
+}
+
+async function connectTikTokQr() {
+  stopTikTokQrPolling();
+  tiktokQrConnectButton.disabled = true;
+  tiktokQrConnectButton.textContent = "Preparing QR...";
+
+  const response = await fetch("/api/tiktok/qr/start", { method: "POST" });
+  const data = await response.json();
+
+  tiktokQrConnectButton.disabled = false;
+  tiktokQrConnectButton.textContent = "Connect by QR";
+
+  if (!response.ok) {
+    tiktokQrPanel.hidden = false;
+    tiktokQrPanel.innerHTML = `<p>QR connect failed: ${escapeHtml(data.error || "Unknown error")}</p>`;
+    return;
+  }
+
+  renderTikTokQrPanel(data);
+  tiktokQrPollHandle = window.setInterval(() => {
+    pollTikTokQr().catch((error) => {
+      stopTikTokQrPolling();
+      tiktokQrPanel.innerHTML = `<p>QR status failed: ${escapeHtml(error.message)}</p>`;
+    });
+  }, 2500);
+}
+
 async function disconnectTikTok() {
+  stopTikTokQrPolling();
   tiktokDisconnectButton.disabled = true;
   const response = await fetch("/api/tiktok/disconnect", { method: "POST" });
   const data = await response.json();
   tiktokDisconnectButton.disabled = false;
+  tiktokQrPanel.hidden = true;
   renderTikTokStatus(data);
 }
 
@@ -657,6 +740,7 @@ function pollJob() {
 form.addEventListener("submit", startRun);
 tiktokForm.addEventListener("submit", saveTikTokSettings);
 tiktokConnectButton.addEventListener("click", connectTikTok);
+tiktokQrConnectButton.addEventListener("click", connectTikTokQr);
 tiktokDisconnectButton.addEventListener("click", disconnectTikTok);
 sourceForm.addEventListener("submit", saveSource);
 automationForm.addEventListener("submit", saveAutomationSettings);
