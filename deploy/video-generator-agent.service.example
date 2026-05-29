@@ -1,0 +1,20 @@
+[Unit]
+Description=Video Generator Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/video-generator-agent
+Environment=VIDEO_AGENT_HOST=127.0.0.1
+Environment=VIDEO_AGENT_PORT=8765
+Environment=VIDEO_AGENT_BASIC_AUTH_USER=admin
+Environment=VIDEO_AGENT_BASIC_AUTH_PASSWORD=change-this-password
+Environment=TIKTOK_MAX_PENDING_SHARES=5
+Environment=TIKTOK_UPLOAD_MAX_ATTEMPTS=4
+ExecStart=/opt/video-generator-agent/.venv/bin/python app.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

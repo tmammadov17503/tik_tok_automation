@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Generator Agent</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">Video_Generator_Agent</p>
+        <h1>One-click short video workflow</h1>
+        <p class="hero-copy">
+          This local app replaces the Vizard-plus-watermark-removal chain with a cleaner,
+          cheaper pipeline for content you own or are allowed to publish.
+        </p>
+      </div>
+      <div class="status-card">
+        <h2>Local tool status</h2>
+        <div id="tool-status" class="tool-grid"></div>
+        <p class="status-note">
+          ffmpeg renders vertical clips, yt-dlp handles source downloads, and Whisper adds captions when available.
+        </p>
+      </div>
+    </section>
+
+    <section class="tiktok-strip">
+      <article class="tiktok-card">
+        <div class="lane-header">
+          <h2>TikTok account</h2>
+          <p>Save the app credentials locally, connect your account once, then we can build posting and scheduling on top.</p>
+        </div>
+
+        <div id="tiktok-summary" class="tiktok-summary">
+          <p>Connection status not loaded yet.</p>
+        </div>
+
+        <form id="tiktok-form" class="tiktok-form">
+          <div class="grid-two">
+            <label>
+              Client key
+              <input name="client_key" type="text" placeholder="Paste your TikTok client key once">
+            </label>
+
+            <label>
+              Client secret
+              <input name="client_secret" type="password" placeholder="Paste your TikTok client secret once">
+            </label>
+          </div>
+
+          <div class="grid-two">
+            <label>
+              Redirect URI
+              <input name="redirect_uri" type="text" value="http://127.0.0.1:8765/auth/tiktok/callback">
+            </label>
+
+            <label>
+              OAuth scopes
+              <input name="scopes" type="text" value="user.info.basic,video.upload">
+            </label>
+          </div>
+
+          <p class="field-note">
+            These settings are stored only on this machine inside the app folder. Leave the key and secret blank later if you only want to update the redirect URI or scopes.
+          </p>
+
+          <div class="action-row">
+            <button id="tiktok-save" type="submit">Save TikTok settings</button>
+            <button id="tiktok-connect" type="button">Connect TikTok</button>
+            <button id="tiktok-disconnect" type="button" class="ghost-button">Disconnect</button>
+          </div>
+        </form>
+      </article>
+    </section>
+
+    <section class="tiktok-strip">
+      <article class="tiktok-card">
+        <div class="lane-header">
+          <h2>Source queue</h2>
+          <p>Keep approved source URLs in one place and track how many clips are posted or still left to publish.</p>
+        </div>
+
+        <form id="source-form" class="tiktok-form">
+          <div class="grid-two">
+            <label>
+              Source URL
+              <input name="source_url" type="text" placeholder="https://www.youtube.com/watch?v=..." required>
+            </label>
+
+            <label>
+              Planned clips
+              <input name="planned_clips" type="number" min="1" max="20" value="8">
+            </label>
+          </div>
+
+          <label>
+            Label (optional)
+            <input name="title" type="text" placeholder="Episode label or internal note">
+          </label>
+
+          <div class="action-row">
+            <button id="source-save" type="submit">Add source</button>
+          </div>
+        </form>
+
+        <div id="source-list" class="source-list">
+          <p>No queued sources yet.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="tiktok-strip">
+      <article class="tiktok-card">
+        <div class="lane-header">
+          <h2>Automation</h2>
+          <p>Generate queued clips, upload the next one every 6 hours, and keep the TikTok queue moving while this app stays open.</p>
+        </div>
+
+        <div id="automation-summary" class="tiktok-summary">
+          <p>Automation status not loaded yet.</p>
+        </div>
+
+        <form id="automation-form" class="tiktok-form">
+          <div class="grid-two">
+            <label>
+              Run every
+              <input name="interval_hours" type="number" min="1" max="24" value="6">
+            </label>
+
+            <label class="checkbox">
+              <input name="enabled" type="checkbox">
+              <span>Automation enabled</span>
+            </label>
+          </div>
+
+          <div class="action-row">
+            <button id="automation-save" type="submit">Save automation</button>
+            <button id="automation-run" type="button">Run now</button>
+          </div>
+        </form>
+
+        <div id="automation-queue" class="source-list">
+          <p>No queued TikTok clips yet.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="board">
+      <div class="lane">
+        <div class="lane-header">
+          <h2>Workflow</h2>
+          <p>n8n-style stages, but optimized for a single button run.</p>
+        </div>
+
+        <div class="node-row">
+          <article class="node active">
+            <span class="node-label">Input</span>
+            <h3>Source + topic</h3>
+            <p>Provide a local file or URL plus a topic label for packaging.</p>
+          </article>
+          <div class="arrow">-&gt;</div>
+          <article class="node">
+            <span class="node-label">Analyze</span>
+            <h3>Subtitle + audio scan</h3>
+            <p>Pulls subtitles when possible, then scores likely highlight moments before rendering.</p>
+          </article>
+          <div class="arrow">-&gt;</div>
+          <article class="node">
+            <span class="node-label">Rank</span>
+            <h3>Highlight selection</h3>
+            <p>Choose the strongest non-overlapping windows instead of defaulting to the beginning.</p>
+          </article>
+        </div>
+
+        <div class="node-row">
+          <article class="node">
+            <span class="node-label">Render</span>
+            <h3>High-quality vertical</h3>
+            <p>Builds full-frame 9:16 clips locally with a tighter crop, cleaner subtitles, and stronger output settings.</p>
+          </article>
+          <div class="arrow">-&gt;</div>
+          <article class="node">
+            <span class="node-label">AI</span>
+            <h3>Captions</h3>
+            <p>Uses source subtitles when available, with Whisper as a fallback for local-only caption generation.</p>
+          </article>
+          <div class="arrow">-&gt;</div>
+          <article class="node">
+            <span class="node-label">Publish</span>
+            <h3>Export-ready</h3>
+            <p>Outputs clips, metadata, and analysis so you can review the picks before posting.</p>
+          </article>
+        </div>
+      </div>
+
+      <aside class="control-panel">
+        <form id="run-form">
+          <h2>Start a run</h2>
+
+          <label>
+            Project name
+            <input name="project_name" type="text" value="Kitchen Shorts Generator" required>
+          </label>
+
+          <label>
+            Topic
+            <input name="topic" type="text" value="Kitchen series dramatic clip">
+          </label>
+
+          <label>
+            Source mode
+            <select name="source_mode">
+              <option value="remote_url">Remote URL</option>
+              <option value="local_file">Local file</option>
+            </select>
+          </label>
+
+          <label>
+            Source URL or file path
+            <input name="source_value" type="text" placeholder="https://... or C:\Videos\clip.mp4" required>
+          </label>
+
+          <label>
+            Timestamps (optional)
+            <input name="segments" type="text" placeholder="00:01:05-00:01:45, 00:03:10-00:03:55">
+          </label>
+          <p class="field-note">Leave this blank to let the analyzer pick highlight moments automatically.</p>
+
+          <div class="grid-two">
+            <label>
+              Clip length
+              <input name="clip_duration_sec" type="number" min="10" max="90" value="30">
+            </label>
+
+            <label>
+              Number of clips
+              <input name="clips_count" type="number" min="1" max="8" value="2">
+            </label>
+          </div>
+
+          <div class="grid-two">
+            <label>
+              Output FPS
+              <select name="frame_rate">
+                <option value="50">50 fps</option>
+                <option value="60" selected>60 fps (default)</option>
+                <option value="source">Source fps</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid-two">
+            <label>
+              Caption language
+              <input name="language" type="text" value="auto" placeholder="auto or ru">
+            </label>
+
+            <label>
+              Whisper model
+              <select name="whisper_model">
+                <option value="tiny">tiny</option>
+                <option value="base">base</option>
+                <option value="small" selected>small</option>
+              </select>
+            </label>
+          </div>
+
+          <label class="checkbox">
+            <input name="add_captions" type="checkbox" checked>
+            Add captions from source subtitles or Whisper when available
+          </label>
+
+          <label>
+            Publish mode
+            <select name="publish_mode">
+              <option value="manual">Manual review/export</option>
+              <option value="tiktok_api">TikTok API draft mode</option>
+            </select>
+          </label>
+
+          <label class="checkbox required">
+            <input name="rights_confirmed" type="checkbox" required>
+            I confirm I own this content or have permission to edit and publish it.
+          </label>
+
+          <button id="run-button" type="submit">Start workflow</button>
+        </form>
+
+        <div class="warning-card">
+          <h3>Guardrails</h3>
+          <p>This build does not remove third-party watermarks and should only be used with licensed or original material.</p>
+        </div>
+      </aside>
+    </section>
+
+    <section class="results">
+      <div class="results-header">
+        <h2>Run monitor</h2>
+        <p id="job-meta">No workflow running yet.</p>
+      </div>
+
+      <div class="results-grid">
+        <article class="panel">
+          <h3>Logs</h3>
+          <pre id="logs">Waiting for a run.</pre>
+        </article>
+        <article class="panel">
+          <h3>Recommended moments</h3>
+          <div id="analysis-summary" class="analysis-list">
+            <p>No analysis yet.</p>
+          </div>
+        </article>
+        <article class="panel">
+          <h3>Artifacts</h3>
+          <ul id="artifacts" class="artifact-list">
+            <li>No outputs yet.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+services:
+  video-agent:
+    build: .
+    restart: unless-stopped
+    environment:
+      VIDEO_AGENT_HOST: 0.0.0.0
+      VIDEO_AGENT_PORT: 8765
+      VIDEO_AGENT_BASIC_AUTH_USER: ${VIDEO_AGENT_BASIC_AUTH_USER:-admin}
+      VIDEO_AGENT_BASIC_AUTH_PASSWORD: ${VIDEO_AGENT_BASIC_AUTH_PASSWORD:-}
+      TIKTOK_MAX_PENDING_SHARES: 5
+      TIKTOK_UPLOAD_MAX_ATTEMPTS: 4
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ./data/secrets:/app/.secrets
+      - ./data/output:/app/output
+      - ./data/queued_clips:/app/queued_clips
+      - ./data/models:/app/.models

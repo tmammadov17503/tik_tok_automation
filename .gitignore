@@ -1,0 +1,14 @@
+.secrets/
+.models/
+.runtime/
+output/
+queued_clips/
+data/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.mp4
+*.mov
+*.mkv
+*.webm

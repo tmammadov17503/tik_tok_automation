@@ -1,0 +1,11 @@
+.git
+.idea
+.runtime
+.secrets
+.models
+__pycache__
+*.pyc
+output
+queued_clips
+data
+*.log
