@@ -558,6 +558,7 @@ class TikTokAuthManager:
             self._delete_file(self.pending_path)
             return {"status": "expired", "message": "QR code expired. Start QR connect again."}
         if status == "utilised":
+            self._delete_file(self.pending_path)
             return {"status": "utilised", "message": "This QR code was already used."}
         if status != "confirmed":
             return {"status": status, "message": f"TikTok returned QR status: {status}."}
@@ -573,8 +574,8 @@ class TikTokAuthManager:
         payload = self._exchange_code_for_token(
             config=config,
             code=code,
-            redirect_uri=redirect_uri or config.get("redirect_uri") or "",
-            allow_without_redirect_uri=True,
+            redirect_uri="",
+            fallback_redirect_uri=redirect_uri or config.get("redirect_uri") or "",
         )
         profile = self.fetch_profile(str(payload.get("access_token") or ""))
         payload["profile"] = profile
@@ -708,7 +709,7 @@ class TikTokAuthManager:
         code: str,
         redirect_uri: str,
         code_verifier: str = "",
-        allow_without_redirect_uri: bool = False,
+        fallback_redirect_uri: str = "",
     ) -> dict[str, Any]:
         token_payload = {
             "client_key": config["client_key"],
@@ -724,12 +725,12 @@ class TikTokAuthManager:
         response = self._post_form(self.TOKEN_URL, token_payload)
         description = str(response.get("error_description") or response.get("error") or "").lower()
         if (
-            allow_without_redirect_uri
-            and token_payload.get("redirect_uri")
+            fallback_redirect_uri
+            and not token_payload.get("redirect_uri")
             and response.get("error")
             and ("redirect" in description or "malformed" in description)
         ):
-            token_payload.pop("redirect_uri", None)
+            token_payload["redirect_uri"] = fallback_redirect_uri
             response = self._post_form(self.TOKEN_URL, token_payload)
         return self._normalize_token_response(response)
 
