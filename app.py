@@ -445,6 +445,7 @@ class TikTokAuthManager:
             "scope": config["scopes"],
             "redirect_uri": config["redirect_uri"],
             "state": state,
+            "disable_auto_auth": "1",
         }
         if code_verifier:
             params["code_challenge"] = hashlib.sha256(code_verifier.encode("utf-8")).hexdigest()
