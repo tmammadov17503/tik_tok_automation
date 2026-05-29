@@ -425,15 +425,18 @@ class TikTokAuthManager:
         if missing:
             raise ValueError(f"Save TikTok settings first: missing {', '.join(missing)}.")
 
-        code_verifier = self._generate_code_verifier()
-        code_challenge = hashlib.sha256(code_verifier.encode("utf-8")).hexdigest()
+        redirect_host = urlparse(config["redirect_uri"]).hostname or ""
+        use_pkce = redirect_host in {"localhost", "127.0.0.1"}
+        code_verifier = self._generate_code_verifier() if use_pkce else ""
         state = secrets.token_urlsafe(24)
         pending = {
             "state": state,
-            "code_verifier": code_verifier,
             "created_at": utc_now(),
             "redirect_uri": config["redirect_uri"],
+            "flow": "desktop" if use_pkce else "web",
         }
+        if code_verifier:
+            pending["code_verifier"] = code_verifier
         self._write_json_file(self.pending_path, pending)
 
         params = {
@@ -442,9 +445,10 @@ class TikTokAuthManager:
             "scope": config["scopes"],
             "redirect_uri": config["redirect_uri"],
             "state": state,
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
         }
+        if code_verifier:
+            params["code_challenge"] = hashlib.sha256(code_verifier.encode("utf-8")).hexdigest()
+            params["code_challenge_method"] = "S256"
         return f"{self.AUTHORIZE_URL}?{urlencode(params)}"
 
     def disconnect(self) -> None:
@@ -521,17 +525,18 @@ class TikTokAuthManager:
             raise RuntimeError("TikTok state check failed. Start the connect flow again.")
 
         config = self.load_config()
-        response = self._post_form(
-            self.TOKEN_URL,
-            {
-                "client_key": config["client_key"],
-                "client_secret": config["client_secret"],
-                "code": code,
-                "grant_type": "authorization_code",
-                "redirect_uri": config["redirect_uri"],
-                "code_verifier": str(pending.get("code_verifier") or ""),
-            },
-        )
+        token_payload = {
+            "client_key": config["client_key"],
+            "client_secret": config["client_secret"],
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": config["redirect_uri"],
+        }
+        code_verifier = str(pending.get("code_verifier") or "")
+        if code_verifier:
+            token_payload["code_verifier"] = code_verifier
+
+        response = self._post_form(self.TOKEN_URL, token_payload)
 
         payload = self._normalize_token_response(response)
         profile = self.fetch_profile(str(payload.get("access_token") or ""))
