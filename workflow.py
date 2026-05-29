@@ -443,6 +443,20 @@ def yt_dlp_cookie_browser_candidates() -> list[str]:
     return [name for name, path in candidates if path.exists()]
 
 
+def yt_dlp_cookie_file_args(root: Path | None = None) -> list[str]:
+    raw_path = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    candidates: list[Path] = []
+    if raw_path:
+        candidates.append(Path(raw_path).expanduser())
+    if root is not None:
+        candidates.append(root / ".secrets" / "youtube_cookies.txt")
+
+    for path in candidates:
+        if path.exists() and path.is_file() and path.stat().st_size > 0:
+            return ["--cookies", str(path.resolve())]
+    return []
+
+
 def yt_dlp_error_summary(completed: subprocess.CompletedProcess[str]) -> str:
     stderr = (completed.stderr or "").strip()
     stdout = (completed.stdout or "").strip()
@@ -835,6 +849,7 @@ class WorkflowPipeline:
         job.log("Downloading source with yt-dlp.")
         target = job_dir / "source.%(ext)s"
         video_command = yt_dlp + [
+            *yt_dlp_cookie_file_args(self.root),
             "--sleep-requests",
             "1",
             "--sleep-interval",
@@ -858,6 +873,7 @@ class WorkflowPipeline:
         job.log(completed.stdout.strip() or "Download finished.")
 
         subtitle_command = yt_dlp + [
+            *yt_dlp_cookie_file_args(self.root),
             "--sleep-requests",
             "1",
             "--sleep-interval",
@@ -947,6 +963,7 @@ class WorkflowPipeline:
         job.log(f"Source quality is only {width}x{height}. Trying a higher-quality retry.")
         retry_target = job_dir / "source_hq.%(ext)s"
         retry_command = yt_dlp + [
+            *yt_dlp_cookie_file_args(self.root),
             "--sleep-requests",
             "1",
             "--sleep-interval",
