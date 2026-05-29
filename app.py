@@ -75,7 +75,12 @@ def basic_auth_credentials() -> tuple[str, str] | None:
 
 
 def json_request(url: str, *, method: str = "GET", headers: dict[str, str] | None = None, data: bytes | None = None) -> dict[str, Any]:
-    request = Request(url, data=data, method=method, headers=headers or {})
+    request_headers = {
+        "Accept": "application/json",
+        "User-Agent": "VideoGeneratorAgent/0.2 (+https://158.180.17.172.nip.io)",
+    }
+    request_headers.update(headers or {})
+    request = Request(url, data=data, method=method, headers=request_headers)
     try:
         with urlopen(request, timeout=30) as response:
             raw = response.read().decode("utf-8")
@@ -85,7 +90,8 @@ def json_request(url: str, *, method: str = "GET", headers: dict[str, str] | Non
             payload = json.loads(raw)
         except Exception:
             payload = {"error": "http_error", "error_description": raw or str(exc)}
-        raise RuntimeError(payload.get("error_description") or payload.get("message") or raw or str(exc)) from exc
+        message = payload.get("error_description") or payload.get("message") or raw or str(exc)
+        raise RuntimeError(f"TikTok HTTP {exc.code}: {message}") from exc
     except URLError as exc:
         raise RuntimeError(f"Network error while contacting TikTok: {exc.reason}") from exc
 
@@ -461,6 +467,22 @@ class TikTokAuthManager:
         if missing:
             raise ValueError(f"Save TikTok settings first: missing {', '.join(missing)}.")
 
+        pending = self._read_json_file(self.pending_path)
+        pending_created = iso_to_datetime(str(pending.get("created_at") or ""))
+        if (
+            pending.get("flow") == "qr"
+            and pending.get("qr_data_url")
+            and pending_created
+            and pending_created > datetime.now(timezone.utc) - timedelta(minutes=2)
+        ):
+            return {
+                "status": "new",
+                "message": "Scan this QR code with the TikTok app, then confirm access on your phone.",
+                "qr_data_url": pending["qr_data_url"],
+                "scopes": pending.get("scope") or config["scopes"],
+                "reused": True,
+            }
+
         state = secrets.token_urlsafe(24)
         client_ticket = secrets.token_urlsafe(24)
         response = self._post_form(
@@ -480,6 +502,7 @@ class TikTokAuthManager:
             raise RuntimeError("TikTok did not return a QR authorization token.")
 
         scan_url = self._set_query_value(scan_url, "client_ticket", client_ticket)
+        qr_data_url = self._make_qr_data_url(scan_url)
         pending = {
             "state": state,
             "flow": "qr",
@@ -487,13 +510,14 @@ class TikTokAuthManager:
             "qr_token": qr_token,
             "client_ticket": client_ticket,
             "scope": config["scopes"],
+            "qr_data_url": qr_data_url,
         }
         self._write_json_file(self.pending_path, pending)
 
         return {
             "status": "new",
             "message": "Scan this QR code with the TikTok app, then confirm access on your phone.",
-            "qr_data_url": self._make_qr_data_url(scan_url),
+            "qr_data_url": qr_data_url,
             "scopes": config["scopes"],
         }
 
@@ -503,14 +527,22 @@ class TikTokAuthManager:
             return {"status": "not_started", "message": "Start QR connect first."}
 
         config = self.load_config()
-        response = self._post_form(
-            self.QR_CHECK_URL,
-            {
-                "client_key": config["client_key"],
-                "client_secret": config["client_secret"],
-                "token": str(pending.get("qr_token") or ""),
-            },
-        )
+        try:
+            response = self._post_form(
+                self.QR_CHECK_URL,
+                {
+                    "client_key": config["client_key"],
+                    "client_secret": config["client_secret"],
+                    "token": str(pending.get("qr_token") or ""),
+                },
+            )
+        except RuntimeError as exc:
+            if "TikTok HTTP 403" in str(exc):
+                return {
+                    "status": "waiting",
+                    "message": "TikTok temporarily blocked one QR status check. Keep the QR open; the app will retry.",
+                }
+            raise
         if response.get("error"):
             raise RuntimeError(response.get("error_description") or response["error"])
 

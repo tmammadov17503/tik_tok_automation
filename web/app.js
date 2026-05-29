@@ -568,7 +568,7 @@ async function connectTikTokQr() {
       stopTikTokQrPolling();
       tiktokQrPanel.innerHTML = `<p>QR status failed: ${escapeHtml(error.message)}</p>`;
     });
-  }, 2500);
+  }, 9000);
 }
 
 async function disconnectTikTok() {
