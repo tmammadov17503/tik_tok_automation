@@ -1,6 +1,7 @@
 .secrets/
 .models/
 .runtime/
+.venv/
 output/
 queued_clips/
 data/
