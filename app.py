@@ -791,6 +791,15 @@ class AppHandler(BaseHTTPRequestHandler):
         return
 
     def _is_authorized(self) -> bool:
+        public_paths = {
+            "/auth/tiktok/callback",
+            "/privacy.html",
+            "/terms.html",
+            "/legal-styles.css",
+        }
+        if urlparse(self.path).path in public_paths:
+            return True
+
         credentials = basic_auth_credentials()
         if credentials is None:
             return True
