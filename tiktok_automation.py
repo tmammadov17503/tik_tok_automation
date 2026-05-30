@@ -835,6 +835,8 @@ class AutomationController:
             "add_captions": True,
             "publish_mode": "tiktok_api",
             "rights_confirmed": True,
+            "hashtags": list(self.post_queue.default_hashtags),
+            "caption_hint": self._caption_hint_for_item({"hashtags": self.post_queue.default_hashtags}),
         }
         job = AutomationJobProxy(self, source_entry)
         self.notify(

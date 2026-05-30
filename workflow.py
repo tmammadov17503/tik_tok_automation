@@ -205,8 +205,8 @@ def files_match(left: Path, right: Path) -> bool:
 def ffmpeg_subtitles_filter(path: Path) -> str:
     escaped = str(path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", r"\'")
     style = (
-        "Fontname=Arial Black,Fontsize=15,Bold=1,Outline=2.4,Shadow=0.9,"
-        "Alignment=2,MarginL=72,MarginR=72,MarginV=118,BorderStyle=1,Spacing=0.10,WrapStyle=2,"
+        "Fontname=Arial Black,Fontsize=12,Bold=1,Outline=2.1,Shadow=0.8,"
+        "Alignment=2,MarginL=72,MarginR=72,MarginV=108,BorderStyle=1,Spacing=0.08,WrapStyle=2,"
         "PrimaryColour=&H00FFFFFF&,OutlineColour=&H00101010&,BackColour=&H00000000&"
     )
     return f"subtitles='{escaped}':force_style='{style}'"
@@ -262,6 +262,11 @@ def caption_key(text: str) -> str:
 
 def has_caption_letters(text: str) -> bool:
     return bool(re.search(r"[A-Za-z\u0400-\u04FF]", text))
+
+
+def caption_word_count(text: str) -> int:
+    words = re.findall(r"[0-9A-Za-z\u0400-\u04FF']+", text)
+    return sum(1 for word in words if has_caption_letters(word))
 
 
 def is_low_quality_caption(text: str) -> bool:
@@ -671,7 +676,7 @@ class WorkflowPipeline:
         if subtitle_entries:
             job.log(f"Loaded {len(subtitle_entries)} subtitle cues for highlight analysis.")
 
-        segments, analysis = self._build_segments(job, request, bundle, subtitle_entries)
+        segments, analysis = self._build_segments(job, request, bundle, subtitle_entries, job_dir)
         segments_path = job_dir / "segments.json"
         segments_path.write_text(
             json.dumps([segment.as_dict() for segment in segments], indent=2),
@@ -700,6 +705,11 @@ class WorkflowPipeline:
             job_dir,
         )
         self._build_upload_notes(job, request, final_outputs, analysis, bundle, job_dir)
+        subtitle_paths = [
+            Path(output["subtitle_path"])
+            for output in final_outputs
+            if output.get("subtitle_path")
+        ]
         self._cleanup_current_run_intermediates(
             job,
             job_dir,
@@ -710,6 +720,7 @@ class WorkflowPipeline:
                 metadata_path,
                 job_dir / "NEXT_STEPS.md",
                 *[Path(output["path"]) for output in final_outputs],
+                *subtitle_paths,
             ],
         )
 
@@ -829,6 +840,12 @@ class WorkflowPipeline:
             "source_cache_dir": str(payload.get("source_cache_dir") or "").strip(),
             "source_queue_id": str(payload.get("source_queue_id") or "").strip(),
             "source_original_url": str(payload.get("source_original_url") or "").strip(),
+            "hashtags": [
+                str(tag).strip()
+                for tag in (payload.get("hashtags") or [])
+                if str(tag).strip()
+            ],
+            "caption_hint": str(payload.get("caption_hint") or "").strip(),
         }
 
     def _validate_request(self, request: dict[str, Any]) -> None:
@@ -877,11 +894,14 @@ class WorkflowPipeline:
             if not source_path.exists():
                 raise FileNotFoundError(f"Local source not found: {source_path}")
             subtitle_path = self._find_local_subtitle(source_path, request.get("language"))
-            duration = self._probe_duration(job, source_path)
+            info_path = source_path.with_name("source.info.json")
+            info_payload = self._read_info_json(info_path) if info_path.exists() else {}
+            duration = self._safe_float(info_payload.get("duration")) or self._probe_duration(job, source_path)
             return SourceBundle(
                 source_path=source_path,
                 subtitle_path=subtitle_path,
-                title=source_path.stem,
+                info_path=info_path if info_path.exists() else None,
+                title=str(info_payload.get("title") or source_path.stem),
                 duration=duration,
             )
 
@@ -1199,6 +1219,7 @@ class WorkflowPipeline:
         request: dict[str, Any],
         bundle: SourceBundle,
         subtitle_entries: list[SubtitleEntry],
+        job_dir: Path,
     ) -> tuple[list[Segment], dict[str, Any]]:
         if request["segments"]:
             job.log("Using explicit timestamps.")
@@ -1242,11 +1263,15 @@ class WorkflowPipeline:
         if duration:
             job.log("Falling back to audio-driven highlight analysis.")
             segments, analysis = self._build_segments_from_audio(
+                job,
+                request,
                 bundle.source_path,
+                bundle.title or "",
                 duration,
                 clip_duration,
                 clips_count,
                 selection_offset,
+                job_dir,
             )
             if segments:
                 return segments, analysis
@@ -1754,12 +1779,18 @@ class WorkflowPipeline:
         if not captions:
             captions = [f"{source_title} highlight {index}" for index in range(1, len(segments) + 1)]
 
+        hashtags = request.get("hashtags") or self._hashtags(topic)
+        caption_hint = str(request.get("caption_hint") or "").strip()
+        if not caption_hint:
+            caption_hint = " ".join(str(tag) for tag in hashtags if str(tag).strip()).strip()
+
         payload = {
             "topic": topic,
             "source_title": source_title,
             "publish_mode": request["publish_mode"],
             "captions": captions,
-            "hashtags": self._hashtags(topic),
+            "hashtags": hashtags,
+            "caption_hint": caption_hint,
             "analysis_method": analysis.get("method"),
             "segments": [segment.as_dict() for segment in segments],
             "outputs": [str(item["path"].name) for item in outputs],
@@ -1809,6 +1840,10 @@ class WorkflowPipeline:
             "## Current output",
             "",
         ]
+
+        caption_hint = str(request.get("caption_hint") or "").strip()
+        if caption_hint:
+            lines.extend(["## Caption", "", caption_hint, ""])
 
         if outputs:
             for item in outputs:
@@ -1922,11 +1957,15 @@ class WorkflowPipeline:
 
     def _build_segments_from_audio(
         self,
+        job: Any,
+        request: dict[str, Any],
         source_path: Path,
+        source_title: str,
         duration: float,
         clip_duration: float,
         clips_count: int,
         selection_offset: int,
+        job_dir: Path,
     ) -> tuple[list[Segment], dict[str, Any]]:
         max_start = max(0.0, duration - clip_duration)
         stride = max(12.0, clip_duration * 0.6)
@@ -1960,13 +1999,149 @@ class WorkflowPipeline:
             )
 
         candidates.sort(key=lambda item: item["score"], reverse=True)
-        segments = self._select_segments(candidates, clips_count, clip_duration, "audio-highlight", selection_offset)
+        method = "audio_only"
+        if self._score_audio_candidates_with_openai(
+            job,
+            request,
+            source_path,
+            source_title,
+            candidates,
+            clip_duration,
+            selection_offset + clips_count,
+            job_dir,
+        ):
+            method = "audio_plus_openai_dialogue"
+            candidates.sort(key=lambda item: item["score"], reverse=True)
+
+        strategy = "dialogue-highlight" if method == "audio_plus_openai_dialogue" else "audio-highlight"
+        segments = self._select_segments(candidates, clips_count, clip_duration, strategy, selection_offset)
         return segments, {
-            "method": "audio_only",
+            "method": method,
             "subtitle_source": None,
             "selected_segments": [segment.as_dict() for segment in segments],
             "top_candidates": candidates[:12],
         }
+
+    def _score_audio_candidates_with_openai(
+        self,
+        job: Any,
+        request: dict[str, Any],
+        source_path: Path,
+        source_title: str,
+        candidates: list[dict[str, Any]],
+        clip_duration: float,
+        target_count: int,
+        job_dir: Path,
+    ) -> bool:
+        if not candidates or not openai_transcription_available():
+            return False
+
+        ffmpeg = ffmpeg_command()
+        if ffmpeg is None:
+            return False
+
+        probe_count = min(len(candidates), max(10, min(24, target_count * 4)))
+        probe_dir = job_dir / "candidate_transcripts"
+        probe_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            from openai import OpenAI
+
+            client = OpenAI()
+        except Exception as exc:
+            job.log(f"OpenAI dialogue probing skipped: {exc}")
+            return False
+
+        model = openai_transcription_model()
+        language = str(request.get("language") or "auto").strip().lower()
+        prefer_cyrillic = bool(re.search(r"[\u0400-\u04FF]", source_title))
+        useful = 0
+        job.log(f"Checking {probe_count} candidate window(s) for real dialogue with OpenAI.")
+
+        for index, candidate in enumerate(candidates[:probe_count], start=1):
+            start = float(candidate["start"])
+            end = float(candidate["end"])
+            audio_path = probe_dir / f"candidate_{index:02d}.mp3"
+            extract_command = ffmpeg + [
+                "-y",
+                "-ss",
+                seconds_to_ffmpeg_time(start),
+                "-i",
+                str(source_path),
+                "-t",
+                f"{max(1.0, end - start):.3f}",
+                "-vn",
+                "-sn",
+                "-dn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-b:a",
+                "64k",
+                str(audio_path),
+            ]
+            completed = run_command(extract_command, check=False)
+            if completed.returncode != 0 or not audio_path.exists() or audio_path.stat().st_size <= 0:
+                candidate["reason"] = f"{candidate.get('reason') or 'Audio window'}; dialogue probe failed"
+                candidate["score"] = round(float(candidate["score"]) * 0.25, 4)
+                continue
+
+            try:
+                params: dict[str, Any] = {
+                    "file": audio_path.open("rb"),
+                    "model": model,
+                    "response_format": "text",
+                }
+                if language and language != "auto":
+                    params["language"] = language
+                try:
+                    response = client.audio.transcriptions.create(**params)
+                finally:
+                    params["file"].close()
+            except Exception as exc:
+                candidate["reason"] = f"{candidate.get('reason') or 'Audio window'}; dialogue probe failed"
+                candidate["score"] = round(float(candidate["score"]) * 0.25, 4)
+                job.log(f"Dialogue probe failed for candidate {index}: {exc}")
+                continue
+
+            transcript = clean_caption_text(str(response.text if hasattr(response, "text") else response))
+            transcript = re.sub(r"\s+", " ", transcript).strip()
+            word_count = caption_word_count(transcript)
+            candidate["word_count"] = word_count
+            candidate["cue_count"] = 0
+            candidate["excerpt"] = transcript[:180].rstrip()
+            has_cyrillic = bool(re.search(r"[\u0400-\u04FF]", transcript))
+
+            if prefer_cyrillic and not has_cyrillic:
+                candidate["transcript_score"] = 0.0
+                candidate["score"] = round(float(candidate["audio_score"]) * 0.12, 4)
+                candidate["reason"] = "Rejected non-Cyrillic transcript for Cyrillic source"
+                continue
+
+            if word_count < 3 or is_low_quality_caption(transcript):
+                candidate["transcript_score"] = 0.0
+                candidate["score"] = round(float(candidate["audio_score"]) * 0.18, 4)
+                candidate["reason"] = "Rejected low-dialogue or numeric-only transcript"
+                continue
+
+            punctuation_hits = len(re.findall(r"[!?]", transcript)) + transcript.count("...")
+            density_score = clamp(word_count / max(18.0, clip_duration * 1.15), 0.0, 1.4)
+            punctuation_score = clamp(punctuation_hits / 4.0, 0.0, 1.0)
+            transcript_score = clamp((density_score * 0.86) + (punctuation_score * 0.14), 0.0, 1.45)
+            audio_score = float(candidate["audio_score"])
+            candidate["transcript_score"] = round(transcript_score, 4)
+            candidate["score"] = round((transcript_score * 0.78) + (audio_score * 0.22), 4)
+            candidate["reason"] = f"Dialogue probe {word_count} words, audio score {audio_score:.2f}"
+            useful += 1
+
+        if useful <= 0:
+            return False
+
+        for candidate in candidates[probe_count:]:
+            candidate["score"] = round(float(candidate["score"]) * 0.22, 4)
+            candidate["reason"] = f"{candidate.get('reason') or 'Audio window'}; not dialogue-probed"
+        return True
 
     def _load_subtitles(self, subtitle_path: Path | None) -> list[SubtitleEntry]:
         if subtitle_path is None or not subtitle_path.exists():
