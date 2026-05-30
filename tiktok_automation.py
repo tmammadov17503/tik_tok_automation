@@ -782,7 +782,7 @@ class AutomationController:
             "source_value": source_entry.get("source_url") or "",
             "segments": "",
             "clip_duration_sec": 30,
-            "clips_count": min(remaining, 8),
+            "clips_count": 1,
             "frame_rate": "source",
             "language": "auto",
             "whisper_model": "small",
