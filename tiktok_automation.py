@@ -702,6 +702,15 @@ class AutomationController:
         except Exception as exc:
             self._set_last_error(str(exc))
             self.append_log(f"Automation cycle failed: {exc}")
+            self.notify(f"Automation run failed: {exc}")
+            with self._lock:
+                state = self._read_state()
+                state["last_run_at"] = utc_now()
+                interval_hours = int(state.get("interval_hours") or 6)
+                state["next_run_at"] = (
+                    datetime.now(timezone.utc) + timedelta(hours=interval_hours)
+                ).isoformat(timespec="seconds").replace("+00:00", "Z")
+                self._write_state(state)
         finally:
             self._running.release()
 
