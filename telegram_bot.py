@@ -14,6 +14,16 @@ from urllib.request import Request, urlopen
 
 YOUTUBE_URL_PATTERN = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s<>()]+", re.IGNORECASE)
 TRUE_VALUES = {"1", "true", "yes", "on"}
+BOT_COMMANDS = [
+    {"command": "start", "description": "Connect this chat and show help"},
+    {"command": "status", "description": "Show automation and inbox counts"},
+    {"command": "queue", "description": "Show queued YouTube links and progress"},
+    {"command": "run", "description": "Start one automation run now"},
+    {"command": "pause", "description": "Pause scheduled 6-hour runs"},
+    {"command": "resume", "description": "Resume the 6-hour schedule"},
+    {"command": "posted", "description": "Mark oldest inbox video as posted"},
+    {"command": "help", "description": "Show available commands"},
+]
 
 
 def utc_now() -> str:
@@ -59,6 +69,7 @@ class TelegramBotService:
             "chat_id": str(config.get("chat_id") or ""),
             "last_error": str(config.get("last_error") or ""),
             "last_update_at": str(config.get("last_update_at") or ""),
+            "commands_installed": bool(config.get("commands_installed")),
         }
 
     def save_config(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -80,6 +91,14 @@ class TelegramBotService:
 
             config["updated_at"] = utc_now()
             self._write_config(config)
+            saved_token = str(config.get("bot_token") or "").strip()
+            enabled = bool(config.get("enabled"))
+        if saved_token and enabled:
+            try:
+                self.install_command_menu(saved_token)
+                self._mark_commands_installed()
+            except Exception as exc:
+                self._save_error(f"Telegram command menu setup failed: {exc}")
         return self.status()
 
     def load_config(self) -> dict[str, Any]:
@@ -100,6 +119,7 @@ class TelegramBotService:
             "last_update_id": int(config.get("last_update_id") or 0),
             "last_error": str(config.get("last_error") or ""),
             "last_update_at": str(config.get("last_update_at") or ""),
+            "commands_installed": bool(config.get("commands_installed")),
         }
 
     def notify(self, message: str) -> None:
@@ -113,6 +133,21 @@ class TelegramBotService:
         except Exception as exc:
             self._save_error(str(exc))
 
+    def install_command_menu(self, token: str | None = None) -> bool:
+        config = self.load_config()
+        bot_token = token or str(config.get("bot_token") or "")
+        if not bot_token:
+            return False
+        self._telegram_request(
+            bot_token,
+            "setMyCommands",
+            {
+                "commands": BOT_COMMANDS,
+                "scope": {"type": "default"},
+            },
+        )
+        return True
+
     def _poll_loop(self) -> None:
         while not self._stop_event.wait(3):
             config = self.load_config()
@@ -121,6 +156,9 @@ class TelegramBotService:
                 continue
 
             try:
+                if not config.get("commands_installed"):
+                    self.install_command_menu(token)
+                    self._mark_commands_installed()
                 response = self._telegram_request(
                     token,
                     "getUpdates",
@@ -157,6 +195,7 @@ class TelegramBotService:
         if not configured_chat_id:
             self.save_config({"chat_id": chat_id, "enabled": True})
             configured_chat_id = chat_id
+            self.install_command_menu(token)
             self._send_message(token, chat_id, "Telegram connected to Video Generator Agent.")
 
         if chat_id != configured_chat_id:
@@ -300,6 +339,13 @@ class TelegramBotService:
             config["last_update_id"] = max(int(config.get("last_update_id") or 0), update_id)
             config["last_update_at"] = utc_now()
             config["last_error"] = ""
+            self._write_config(config)
+
+    def _mark_commands_installed(self) -> None:
+        with self._lock:
+            config = self._read_config()
+            config["commands_installed"] = True
+            config["last_update_at"] = utc_now()
             self._write_config(config)
 
     def _save_error(self, message: str) -> None:
