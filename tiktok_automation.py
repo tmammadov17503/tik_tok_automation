@@ -438,6 +438,7 @@ class AutomationController:
         self._running = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self.notifier: Any | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -448,6 +449,17 @@ class AutomationController:
 
     def stop(self) -> None:
         self._stop_event.set()
+
+    def set_notifier(self, notifier: Any) -> None:
+        self.notifier = notifier
+
+    def notify(self, message: str) -> None:
+        if not self.notifier:
+            return
+        try:
+            self.notifier(message)
+        except Exception:
+            return
 
     def status(self) -> dict[str, Any]:
         state = self._read_state()
@@ -465,13 +477,68 @@ class AutomationController:
             "queue_counts": {
                 "pending": sum(1 for item in queue_items if item.get("status") == "pending"),
                 "active": sum(1 for item in queue_items if item.get("status") in {"uploading", "processing", "sent_to_inbox"}),
+                "making": sum(1 for item in queue_items if item.get("status") in {"pending", "uploading", "processing"}),
+                "inbox": sum(1 for item in queue_items if item.get("status") == "sent_to_inbox"),
                 "posted": sum(1 for item in queue_items if item.get("status") == "posted"),
                 "failed": sum(1 for item in queue_items if item.get("status") == "failed"),
             },
+            "running": self._running.locked(),
             "tiktok_pending_cap": self.max_pending_shares,
             "tiktok_remote_pending": remote_pending_count,
             "can_upload_more_to_tiktok": remote_pending_count < self.max_pending_shares,
             "draft_only": "video.publish" not in str(auth_status.get("token_scope") or ""),
+        }
+
+    def source_progress(self, source_id: str) -> dict[str, Any]:
+        source_entry = next((item for item in self.sources.list_sources() if item.get("id") == source_id), None)
+        items = self.post_queue.items_for_source(source_id)
+        planned = int((source_entry or {}).get("planned_clips") or 0)
+        posted = int((source_entry or {}).get("posted_clips") or 0)
+        inbox = sum(1 for item in items if item.get("status") == "sent_to_inbox")
+        queued = sum(1 for item in items if item.get("status") == "pending")
+        making = sum(1 for item in items if item.get("status") in {"uploading", "processing"})
+        failed = sum(1 for item in items if item.get("status") == "failed")
+        ready = min(planned, posted + inbox) if planned else posted + inbox
+        return {
+            "source": source_entry,
+            "planned": planned,
+            "posted": posted,
+            "inbox": inbox,
+            "ready": ready,
+            "queued": queued,
+            "making": making,
+            "failed": failed,
+            "remaining": max(0, planned - ready - queued - making) if planned else 0,
+        }
+
+    def source_progress_line(self, source_id: str) -> str:
+        progress = self.source_progress(source_id)
+        source_entry = progress.get("source")
+        if source_entry is None:
+            return "Source complete."
+        planned = progress["planned"]
+        ready = progress["ready"]
+        return (
+            f"{ready}/{planned} ready, {progress['inbox']} in TikTok inbox, "
+            f"{progress['queued'] + progress['making']} making/queued, {progress['remaining']} left."
+        )
+
+    def mark_oldest_inbox_posted(self) -> dict[str, Any]:
+        inbox_items = [
+            item
+            for item in self.post_queue.list_items()
+            if item.get("status") == "sent_to_inbox"
+        ]
+        if not inbox_items:
+            return {"ok": False, "message": "No TikTok inbox video is waiting to be marked as posted."}
+
+        item = sorted(inbox_items, key=lambda value: value.get("inbox_delivered_at") or value.get("updated_at") or "")[0]
+        label = str(item.get("clip_label") or "video")
+        source_id = str(item.get("source_id") or "")
+        self._mark_item_posted(item, "MANUAL_POSTED", notify=False)
+        return {
+            "ok": True,
+            "message": f"Marked {label} as posted. {self.source_progress_line(source_id)}",
         }
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -516,6 +583,7 @@ class AutomationController:
             return
 
         clip_paths = sorted(output_dir.glob("*_captioned.mp4"))
+        captioned = bool(clip_paths)
         if not clip_paths:
             clip_paths = sorted(output_dir.glob("*_vertical.mp4"))
         clip_paths = clip_paths[:remaining]
@@ -523,8 +591,13 @@ class AutomationController:
             return
 
         self.post_queue.enqueue_clip_files(source_entry, clip_paths)
+        caption_note = "with subtitles" if captioned else "without subtitles"
         self.append_log(
             f"Queued {len(clip_paths)} clip(s) from {source_entry.get('title') or source_url} for TikTok upload."
+        )
+        self.notify(
+            f"Created {len(clip_paths)} video(s) {caption_note} from {source_entry.get('title') or source_url}. "
+            f"{self.source_progress_line(str(source_entry.get('id') or ''))}"
         )
 
     def append_log(self, message: str) -> None:
@@ -606,10 +679,12 @@ class AutomationController:
             if next_item is not None:
                 remote_pending_count = self.post_queue.remote_pending_count()
                 if remote_pending_count >= self.max_pending_shares:
-                    self.append_log(
+                    cap_message = (
                         f"TikTok pending inbox cap reached ({remote_pending_count}/{self.max_pending_shares}); "
                         "waiting before uploading another clip."
                     )
+                    self.append_log(cap_message)
+                    self.notify(cap_message)
                 else:
                     self._upload_queue_item(next_item)
             else:
@@ -647,6 +722,7 @@ class AutomationController:
             if remote_status == "PUBLISH_COMPLETE":
                 self._mark_item_posted(item, remote_status)
             elif remote_status == "SEND_TO_USER_INBOX":
+                was_already_delivered = item.get("status") == "sent_to_inbox"
                 self.post_queue.update_item(
                     str(item.get("id")),
                     status="sent_to_inbox",
@@ -654,6 +730,11 @@ class AutomationController:
                     inbox_delivered_at=utc_now(),
                     error="",
                 )
+                if not was_already_delivered:
+                    self.notify(
+                        f"Video sent to TikTok inbox: {item.get('clip_label') or 'generated clip'}. "
+                        f"{self.source_progress_line(str(item.get('source_id') or ''))}"
+                    )
             elif remote_status in {"PROCESSING_UPLOAD", "PROCESSING_DOWNLOAD"}:
                 self.post_queue.update_item(
                     str(item.get("id")),
@@ -668,7 +749,9 @@ class AutomationController:
                     tiktok_status=remote_status,
                     error=fail_reason or "TikTok reported a failed publish.",
                 )
-                self.append_log(f"{item.get('clip_label')} failed on TikTok: {fail_reason or 'unknown reason'}.")
+                message = f"{item.get('clip_label')} failed on TikTok: {fail_reason or 'unknown reason'}."
+                self.append_log(message)
+                self.notify(message)
 
     def _generate_from_next_source(self) -> None:
         source_entry = self._pick_source_for_generation()
@@ -691,7 +774,7 @@ class AutomationController:
             "segments": "",
             "clip_duration_sec": 30,
             "clips_count": min(remaining, 8),
-            "frame_rate": "60",
+            "frame_rate": "source",
             "language": "auto",
             "whisper_model": "small",
             "add_captions": True,
@@ -699,6 +782,10 @@ class AutomationController:
             "rights_confirmed": True,
         }
         job = AutomationJobProxy(self, source_entry)
+        self.notify(
+            f"Generating video clips from {source_entry.get('title') or source_entry.get('source_url')}. "
+            f"{self.source_progress_line(source_id)}"
+        )
         result = self.pipeline.run(job, request)
         self.on_workflow_completed(request, result.output_dir)
 
@@ -717,10 +804,13 @@ class AutomationController:
         clip_path = Path(str(item.get("clip_path") or "")).resolve()
         if not clip_path.exists():
             self.post_queue.update_item(item_id, status="failed", error="Queued clip file is missing.")
-            self.append_log(f"{item.get('clip_label')} could not be uploaded because the clip file is missing.")
+            message = f"{item.get('clip_label')} could not be uploaded because the clip file is missing."
+            self.append_log(message)
+            self.notify(message)
             return
 
         self.post_queue.update_item(item_id, status="uploading", error="")
+        self.notify(f"Uploading {item.get('clip_label') or 'generated clip'} to TikTok inbox.")
         try:
             result = self.publisher.upload_draft(clip_path)
         except Exception as exc:
@@ -740,6 +830,9 @@ class AutomationController:
                     f"{item.get('clip_label')} upload hit a temporary issue and will retry in "
                     f"{delay_minutes} minute(s): {message}"
                 )
+                self.notify(
+                    f"{item.get('clip_label') or 'generated clip'} upload will retry in {delay_minutes} minute(s): {message}"
+                )
                 return
 
             self.post_queue.update_item(
@@ -750,6 +843,7 @@ class AutomationController:
                 error=message,
             )
             self.append_log(f"{item.get('clip_label')} upload failed: {message}")
+            self.notify(f"{item.get('clip_label') or 'generated clip'} upload failed: {message}")
             return
 
         status = str(result.get("status") or "").strip()
@@ -771,8 +865,13 @@ class AutomationController:
             error=result.get("fail_reason") or "",
         )
         self.append_log(f"{item.get('clip_label')} was sent to TikTok with status {status or queue_status}.")
+        if queue_status == "sent_to_inbox":
+            self.notify(
+                f"Video sent to TikTok inbox: {item.get('clip_label') or 'generated clip'}. "
+                f"{self.source_progress_line(str(item.get('source_id') or ''))}"
+            )
 
-    def _mark_item_posted(self, item: dict[str, Any], remote_status: str) -> None:
+    def _mark_item_posted(self, item: dict[str, Any], remote_status: str, *, notify: bool = True) -> None:
         item_id = str(item.get("id") or "")
         source_id = str(item.get("source_id") or "")
         publish_id = item.get("publish_id") or ""
@@ -794,6 +893,11 @@ class AutomationController:
             self._maybe_finalize_source(source_id)
 
         self.append_log(f"{item.get('clip_label')} completed on TikTok and was removed from local queued storage.")
+        if notify:
+            self.notify(
+                f"Posted confirmed for {item.get('clip_label') or 'generated clip'}. "
+                f"{self.source_progress_line(source_id)}"
+            )
 
     def _maybe_finalize_source(self, source_id: str) -> None:
         source_entry = next((item for item in self.sources.list_sources() if item.get("id") == source_id), None)

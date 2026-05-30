@@ -21,7 +21,7 @@
         <h2>Local tool status</h2>
         <div id="tool-status" class="tool-grid"></div>
         <p class="status-note">
-          ffmpeg renders vertical clips, yt-dlp handles source downloads, and Whisper adds captions when available.
+          ffmpeg renders vertical clips, yt-dlp handles source downloads, and OpenAI/Whisper add captions when available.
         </p>
       </div>
     </section>
@@ -75,6 +75,73 @@
         </form>
 
         <div id="tiktok-qr-panel" class="qr-panel" hidden></div>
+      </article>
+    </section>
+
+    <section class="tiktok-strip">
+      <article class="tiktok-card">
+        <div class="lane-header">
+          <h2>Captions</h2>
+          <p>OpenAI transcription is used when source subtitles are missing.</p>
+        </div>
+
+        <div id="runtime-summary" class="tiktok-summary">
+          <p>Caption settings not loaded yet.</p>
+        </div>
+
+        <form id="runtime-form" class="tiktok-form">
+          <div class="grid-two">
+            <label>
+              OpenAI API key
+              <input name="openai_api_key" type="password" placeholder="Paste once">
+            </label>
+
+            <label>
+              Transcription model
+              <input name="openai_transcribe_model" type="text" value="whisper-1">
+            </label>
+          </div>
+
+          <div class="action-row">
+            <button id="runtime-save" type="submit">Save caption settings</button>
+          </div>
+        </form>
+      </article>
+    </section>
+
+    <section class="tiktok-strip">
+      <article class="tiktok-card">
+        <div class="lane-header">
+          <h2>Telegram bot</h2>
+          <p>Send a YouTube link to the bot to queue 8 videos and receive progress notifications.</p>
+        </div>
+
+        <div id="telegram-summary" class="tiktok-summary">
+          <p>Telegram status not loaded yet.</p>
+        </div>
+
+        <form id="telegram-form" class="tiktok-form">
+          <div class="grid-two">
+            <label>
+              Bot token
+              <input name="bot_token" type="password" placeholder="Paste BotFather token once">
+            </label>
+
+            <label>
+              Chat ID
+              <input name="chat_id" type="text" placeholder="Optional; /start can bind it">
+            </label>
+          </div>
+
+          <label class="checkbox">
+            <input name="enabled" type="checkbox">
+            <span>Telegram enabled</span>
+          </label>
+
+          <div class="action-row">
+            <button id="telegram-save" type="submit">Save Telegram settings</button>
+          </div>
+        </form>
       </article>
     </section>
 
@@ -247,9 +314,9 @@
             <label>
               Output FPS
               <select name="frame_rate">
+                <option value="source" selected>Source fps</option>
                 <option value="50">50 fps</option>
-                <option value="60" selected>60 fps (default)</option>
-                <option value="source">Source fps</option>
+                <option value="60">60 fps</option>
               </select>
             </label>
           </div>

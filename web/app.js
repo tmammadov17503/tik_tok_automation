@@ -11,6 +11,10 @@ const tiktokConnectButton = document.getElementById("tiktok-connect");
 const tiktokQrConnectButton = document.getElementById("tiktok-qr-connect");
 const tiktokDisconnectButton = document.getElementById("tiktok-disconnect");
 const tiktokQrPanel = document.getElementById("tiktok-qr-panel");
+const runtimeSummary = document.getElementById("runtime-summary");
+const runtimeForm = document.getElementById("runtime-form");
+const telegramSummary = document.getElementById("telegram-summary");
+const telegramForm = document.getElementById("telegram-form");
 const sourceForm = document.getElementById("source-form");
 const sourceList = document.getElementById("source-list");
 const automationSummary = document.getElementById("automation-summary");
@@ -84,6 +88,48 @@ function renderTikTokStatus(data) {
   }
   if (data.scopes) {
     tiktokForm.elements.scopes.value = data.scopes;
+  }
+}
+
+function renderRuntimeStatus(data) {
+  const lines = [];
+  if (data.openai_configured) {
+    lines.push("<p><strong>OpenAI transcription is ready.</strong></p>");
+  } else {
+    lines.push("<p><strong>OpenAI transcription is not configured.</strong></p>");
+  }
+  lines.push(`<p class="mini-line">API key: ${escapeHtml(data.openai_api_key_preview || "not saved")}</p>`);
+  lines.push(`<p class="mini-line">Model: ${escapeHtml(data.openai_transcribe_model || "whisper-1")}</p>`);
+  if (data.openai_key_source) {
+    lines.push(`<p class="mini-line">Source: ${escapeHtml(data.openai_key_source)}</p>`);
+  }
+  runtimeSummary.innerHTML = lines.join("");
+  runtimeForm.elements.openai_transcribe_model.value = data.openai_transcribe_model || "whisper-1";
+}
+
+function renderTelegramStatus(data) {
+  const lines = [];
+  if (data.enabled && data.connected) {
+    lines.push("<p><strong>Telegram bot is enabled and connected.</strong></p>");
+  } else if (data.enabled && data.configured) {
+    lines.push("<p><strong>Telegram bot is enabled. Send /start to bind the chat.</strong></p>");
+  } else if (data.configured) {
+    lines.push("<p><strong>Telegram bot token is saved, but the bot is paused.</strong></p>");
+  } else {
+    lines.push("<p><strong>Telegram bot is not configured.</strong></p>");
+  }
+  lines.push(`<p class="mini-line">Bot token: ${escapeHtml(data.bot_token_preview || "not saved")}</p>`);
+  lines.push(`<p class="mini-line">Chat ID: ${escapeHtml(data.chat_id || "not bound")}</p>`);
+  if (data.last_error) {
+    lines.push(`<p class="mini-line">Last issue: ${escapeHtml(data.last_error)}</p>`);
+  }
+  if (data.last_update_at) {
+    lines.push(`<p class="mini-line">Last update: ${escapeHtml(data.last_update_at)}</p>`);
+  }
+  telegramSummary.innerHTML = lines.join("");
+  telegramForm.elements.enabled.checked = Boolean(data.enabled);
+  if (data.chat_id) {
+    telegramForm.elements.chat_id.value = data.chat_id;
   }
 }
 
@@ -227,6 +273,18 @@ async function loadTikTokStatus() {
   renderTikTokStatus(data);
 }
 
+async function loadRuntimeStatus() {
+  const response = await fetch("/api/config/status");
+  const data = await response.json();
+  renderRuntimeStatus(data);
+}
+
+async function loadTelegramStatus() {
+  const response = await fetch("/api/telegram/status");
+  const data = await response.json();
+  renderTelegramStatus(data);
+}
+
 async function loadSources() {
   const response = await fetch("/api/sources");
   const data = await response.json();
@@ -297,6 +355,7 @@ function renderAutomationStatus(data) {
   const lines = [];
   lines.push(`<p><strong>${data.enabled ? "Automation is enabled." : "Automation is paused."}</strong></p>`);
   lines.push(`<p class="mini-line">Runs every ${escapeHtml(String(data.interval_hours || 6))} hour(s).</p>`);
+  lines.push(`<p class="mini-line">Running now: ${data.running ? "yes" : "no"}.</p>`);
   if (data.draft_only) {
     lines.push("<p class=\"mini-line\">Current TikTok mode: upload to draft/inbox. Fully public hands-off posting needs video.publish approval later.</p>");
   }
@@ -311,7 +370,7 @@ function renderAutomationStatus(data) {
   }
   if (data.queue_counts) {
     lines.push(
-      `<p class="mini-line">Queue: ${escapeHtml(String(data.queue_counts.pending || 0))} pending, ${escapeHtml(String(data.queue_counts.active || 0))} active, ${escapeHtml(String(data.queue_counts.posted || 0))} posted, ${escapeHtml(String(data.queue_counts.failed || 0))} failed.</p>`
+      `<p class="mini-line">Queue: ${escapeHtml(String(data.queue_counts.pending || 0))} pending, ${escapeHtml(String(data.queue_counts.making || 0))} making/queued, ${escapeHtml(String(data.queue_counts.inbox || 0))} in inbox, ${escapeHtml(String(data.queue_counts.posted || 0))} posted, ${escapeHtml(String(data.queue_counts.failed || 0))} failed.</p>`
     );
   }
   if (data.tiktok_pending_cap) {
@@ -368,6 +427,68 @@ async function saveTikTokSettings(event) {
   tiktokForm.elements.client_key.value = "";
   tiktokForm.elements.client_secret.value = "";
   renderTikTokStatus(data);
+}
+
+async function saveRuntimeSettings(event) {
+  event.preventDefault();
+  const saveButton = document.getElementById("runtime-save");
+  saveButton.disabled = true;
+  saveButton.textContent = "Saving...";
+
+  const payload = {
+    openai_api_key: runtimeForm.elements.openai_api_key.value,
+    openai_transcribe_model: runtimeForm.elements.openai_transcribe_model.value,
+  };
+
+  const response = await fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json();
+
+  saveButton.disabled = false;
+  saveButton.textContent = "Save caption settings";
+
+  if (!response.ok) {
+    runtimeSummary.innerHTML = `<p>Caption settings save failed: ${escapeHtml(data.error || "Unknown error")}</p>`;
+    return;
+  }
+
+  runtimeForm.elements.openai_api_key.value = "";
+  renderRuntimeStatus(data);
+  loadStatus().catch(() => {});
+}
+
+async function saveTelegramSettings(event) {
+  event.preventDefault();
+  const saveButton = document.getElementById("telegram-save");
+  saveButton.disabled = true;
+  saveButton.textContent = "Saving...";
+
+  const payload = {
+    bot_token: telegramForm.elements.bot_token.value,
+    chat_id: telegramForm.elements.chat_id.value,
+    enabled: telegramForm.elements.enabled.checked,
+  };
+
+  const response = await fetch("/api/telegram/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json();
+
+  saveButton.disabled = false;
+  saveButton.textContent = "Save Telegram settings";
+
+  if (!response.ok) {
+    telegramSummary.innerHTML = `<p>Telegram save failed: ${escapeHtml(data.error || "Unknown error")}</p>`;
+    return;
+  }
+
+  telegramForm.elements.bot_token.value = "";
+  renderTelegramStatus(data);
 }
 
 async function saveSource(event) {
@@ -591,7 +712,7 @@ function formToJson(formElement) {
     segments: data.get("segments"),
     clip_duration_sec: Number(data.get("clip_duration_sec") || 30),
     clips_count: Number(data.get("clips_count") || 2),
-    frame_rate: data.get("frame_rate") || "60",
+    frame_rate: data.get("frame_rate") || "source",
     language: data.get("language"),
     whisper_model: data.get("whisper_model"),
     add_captions: data.get("add_captions") === "on",
@@ -742,6 +863,8 @@ tiktokForm.addEventListener("submit", saveTikTokSettings);
 tiktokConnectButton.addEventListener("click", connectTikTok);
 tiktokQrConnectButton.addEventListener("click", connectTikTokQr);
 tiktokDisconnectButton.addEventListener("click", disconnectTikTok);
+runtimeForm.addEventListener("submit", saveRuntimeSettings);
+telegramForm.addEventListener("submit", saveTelegramSettings);
 sourceForm.addEventListener("submit", saveSource);
 automationForm.addEventListener("submit", saveAutomationSettings);
 automationRunButton.addEventListener("click", runAutomationNow);
@@ -751,6 +874,12 @@ loadStatus().catch((error) => {
 loadTikTokStatus().catch((error) => {
   tiktokSummary.innerHTML = `<p>TikTok status check failed: ${escapeHtml(error.message)}</p>`;
 });
+loadRuntimeStatus().catch((error) => {
+  runtimeSummary.innerHTML = `<p>Caption status check failed: ${escapeHtml(error.message)}</p>`;
+});
+loadTelegramStatus().catch((error) => {
+  telegramSummary.innerHTML = `<p>Telegram status check failed: ${escapeHtml(error.message)}</p>`;
+});
 loadSources().catch((error) => {
   sourceList.innerHTML = `<p>Source queue load failed: ${escapeHtml(error.message)}</p>`;
 });
@@ -759,4 +888,5 @@ loadAutomationStatus().catch((error) => {
 });
 automationPollHandle = window.setInterval(() => {
   loadAutomationStatus().catch(() => {});
+  loadTelegramStatus().catch(() => {});
 }, 15000);

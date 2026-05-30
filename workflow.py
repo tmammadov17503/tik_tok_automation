@@ -99,7 +99,7 @@ def yt_dlp_video_format() -> str:
 
 
 def requested_output_fps(request: dict[str, Any]) -> int | None:
-    raw = str(request.get("frame_rate") or "60").strip().lower()
+    raw = str(request.get("frame_rate") or "source").strip().lower()
     if raw in {"50", "60"}:
         return int(raw)
     return None
@@ -778,7 +778,7 @@ class WorkflowPipeline:
             "segments": str(payload.get("segments") or "").strip(),
             "clip_duration_sec": int(payload.get("clip_duration_sec") or 30),
             "clips_count": max(1, min(int(payload.get("clips_count") or 2), 8)),
-            "frame_rate": str(payload.get("frame_rate") or "60").strip(),
+            "frame_rate": str(payload.get("frame_rate") or "source").strip(),
             "language": str(payload.get("language") or "auto").strip(),
             "whisper_model": str(payload.get("whisper_model") or "small").strip(),
             "add_captions": bool(payload.get("add_captions")),
@@ -793,7 +793,7 @@ class WorkflowPipeline:
             raise ValueError("Please confirm that you own the content or have permission to use it.")
         if request["source_mode"] not in {"remote_url", "local_file"}:
             raise ValueError("Unsupported source mode.")
-        if str(request.get("frame_rate") or "60").strip().lower() not in {"source", "50", "60"}:
+        if str(request.get("frame_rate") or "source").strip().lower() not in {"source", "50", "60"}:
             raise ValueError("Unsupported output FPS. Use source, 50, or 60.")
         if request["publish_mode"] not in {"manual", "tiktok_api"}:
             raise ValueError("Unsupported publish mode.")
@@ -1466,11 +1466,11 @@ class WorkflowPipeline:
             "-preset",
             "medium",
             "-crf",
-            "13",
+            "12",
             "-maxrate",
-            "14M",
+            "18M",
             "-bufsize",
-            "20M",
+            "24M",
             "-profile:v",
             "high",
             "-level",
@@ -1526,9 +1526,9 @@ class WorkflowPipeline:
             "12",
             *([] if target_fps is None else ["-r", str(target_fps)]),
             "-maxrate",
-            "14M",
+            "18M",
             "-bufsize",
-            "20M",
+            "24M",
             "-profile:v",
             "high",
             "-level",

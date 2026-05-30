@@ -20,6 +20,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from telegram_bot import TelegramBotService
 from tiktok_automation import AutomationController
 from workflow import WorkflowPipeline, detect_tools
 
@@ -72,6 +73,73 @@ def basic_auth_credentials() -> tuple[str, str] | None:
         return None
     user = os.getenv("VIDEO_AGENT_BASIC_AUTH_USER", "admin").strip() or "admin"
     return user, password
+
+
+class RuntimeConfigManager:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.secrets_root = root / ".secrets"
+        self.secrets_root.mkdir(parents=True, exist_ok=True)
+        self.path = self.secrets_root / "runtime_config.json"
+        self._lock = threading.Lock()
+
+    def load_config(self) -> dict[str, str]:
+        config = self._read()
+        saved_openai_key = str(config.get("openai_api_key") or "").strip()
+        saved_transcribe_model = str(config.get("openai_transcribe_model") or "").strip()
+        env_openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+        env_transcribe_model = os.getenv("OPENAI_TRANSCRIBE_MODEL", "").strip()
+        openai_key = saved_openai_key or env_openai_key
+        return {
+            "openai_api_key": openai_key,
+            "openai_key_source": "saved" if saved_openai_key else ("environment" if env_openai_key else ""),
+            "openai_transcribe_model": saved_transcribe_model or env_transcribe_model or "whisper-1",
+        }
+
+    def status(self) -> dict[str, Any]:
+        config = self.load_config()
+        key = config.get("openai_api_key") or ""
+        return {
+            "openai_configured": bool(key),
+            "openai_api_key_preview": mask_secret(key),
+            "openai_key_source": config.get("openai_key_source") or "",
+            "openai_transcribe_model": config.get("openai_transcribe_model") or "whisper-1",
+        }
+
+    def save_config(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            config = self._read()
+            openai_api_key = str(payload.get("openai_api_key") or "").strip()
+            transcribe_model = str(payload.get("openai_transcribe_model") or "").strip()
+
+            if openai_api_key:
+                config["openai_api_key"] = openai_api_key
+            if payload.get("clear_openai_api_key"):
+                config["openai_api_key"] = ""
+                os.environ.pop("OPENAI_API_KEY", None)
+            if transcribe_model:
+                config["openai_transcribe_model"] = transcribe_model
+            config["updated_at"] = utc_now()
+            self._write(config)
+
+        self.apply_environment()
+        return self.status()
+
+    def apply_environment(self) -> None:
+        config = self.load_config()
+        if config.get("openai_api_key"):
+            os.environ["OPENAI_API_KEY"] = config["openai_api_key"]
+        if config.get("openai_transcribe_model"):
+            os.environ["OPENAI_TRANSCRIBE_MODEL"] = config["openai_transcribe_model"]
+
+    def _read(self) -> dict[str, Any]:
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _write(self, payload: dict[str, Any]) -> None:
+        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def json_request(url: str, *, method: str = "GET", headers: dict[str, str] | None = None, data: bytes | None = None) -> dict[str, Any]:
@@ -813,10 +881,14 @@ class TikTokAuthManager:
 
 
 JOBS = JobRegistry()
+RUNTIME = RuntimeConfigManager(ROOT)
+RUNTIME.apply_environment()
 PIPELINE = WorkflowPipeline(ROOT)
 TIKTOK = TikTokAuthManager(ROOT)
 SOURCES = SourceQueueManager(ROOT)
 AUTOMATION = AutomationController(ROOT, PIPELINE, TIKTOK, SOURCES, DEFAULT_TIKTOK_HASHTAGS)
+TELEGRAM = TelegramBotService(ROOT, SOURCES, AUTOMATION)
+AUTOMATION.set_notifier(TELEGRAM.notify)
 
 
 def run_job(job: JobState, payload: dict[str, Any]) -> None:
@@ -881,6 +953,12 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/tiktok/status":
             self._send_json(TIKTOK.status())
             return
+        if path == "/api/config/status":
+            self._send_json(RUNTIME.status())
+            return
+        if path == "/api/telegram/status":
+            self._send_json(TELEGRAM.status())
+            return
         if path == "/api/tiktok/qr/status":
             try:
                 self._send_json(TIKTOK.check_qr_authorization())
@@ -922,6 +1000,26 @@ class AppHandler(BaseHTTPRequestHandler):
             worker = threading.Thread(target=run_job, args=(job, body), daemon=True)
             worker.start()
             self._send_json({"job_id": job.job_id, "status": job.status}, status=HTTPStatus.ACCEPTED)
+            return
+
+        if parsed.path == "/api/config":
+            if body is None:
+                self._send_json({"error": "Invalid JSON body."}, status=HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                self._send_json(RUNTIME.save_config(body))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        if parsed.path == "/api/telegram/config":
+            if body is None:
+                self._send_json({"error": "Invalid JSON body."}, status=HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                self._send_json(TELEGRAM.save_config(body))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
 
         if parsed.path == "/api/tiktok/config":
@@ -1193,6 +1291,7 @@ def main() -> None:
     except Exception:
         port = 8765
     AUTOMATION.start()
+    TELEGRAM.start()
     server = ThreadingHTTPServer((host, port), AppHandler)
     print(f"Video Generator Agent is running at http://{host}:{port}")
     try:
@@ -1200,6 +1299,7 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nShutting down.")
     finally:
+        TELEGRAM.stop()
         AUTOMATION.stop()
         server.server_close()
 
