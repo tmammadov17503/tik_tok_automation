@@ -185,7 +185,13 @@ class PostQueueManager:
         items = [self._normalize_item(dict(item)) for item in data.get("items") or []]
         return sorted(items, key=lambda item: item.get("created_at") or "", reverse=False)
 
-    def enqueue_clip_files(self, source_entry: dict[str, Any], clip_paths: list[Path]) -> list[dict[str, Any]]:
+    def enqueue_clip_files(
+        self,
+        source_entry: dict[str, Any],
+        clip_paths: list[Path],
+        *,
+        start_index: int | None = None,
+    ) -> list[dict[str, Any]]:
         if not clip_paths:
             return self.list_items()
 
@@ -198,8 +204,16 @@ class PostQueueManager:
                 if str(item.get("status") or "") in POST_QUEUE_KEEP_STATES
             }
 
-            for clip_path in clip_paths:
-                key = (str(source_entry.get("id") or ""), clip_path.name)
+            for offset, clip_path in enumerate(clip_paths):
+                original_name = clip_path.name
+                clip_label = clip_path.stem
+                if start_index is not None:
+                    sequence = max(1, start_index + offset)
+                    suffix = clip_path.suffix.lower() or ".mp4"
+                    original_name = f"clip_{sequence:02d}_vertical_captioned{suffix}"
+                    clip_label = f"clip_{sequence:02d}_vertical_captioned"
+
+                key = (str(source_entry.get("id") or ""), original_name)
                 if key in existing_keys:
                     continue
 
@@ -214,9 +228,9 @@ class PostQueueManager:
                             "source_id": source_entry.get("id"),
                             "source_url": source_entry.get("source_url"),
                             "source_title": source_entry.get("title") or "Saved source",
-                            "clip_label": clip_path.stem,
+                            "clip_label": clip_label,
                             "clip_path": str(stored_path),
-                            "original_name": clip_path.name,
+                            "original_name": original_name,
                             "status": "pending",
                             "hashtags": list(self.default_hashtags),
                             "created_at": now,
@@ -590,7 +604,8 @@ class AutomationController:
         if not clip_paths:
             return
 
-        self.post_queue.enqueue_clip_files(source_entry, clip_paths)
+        start_index = safe_int(request.get("selection_offset"), posted + pending_count) + 1
+        self.post_queue.enqueue_clip_files(source_entry, clip_paths, start_index=start_index)
         caption_note = "with subtitles" if captioned else "without subtitles"
         self.append_log(
             f"Queued {len(clip_paths)} clip(s) from {source_entry.get('title') or source_url} for TikTok upload."
@@ -665,11 +680,13 @@ class AutomationController:
             if not forced:
                 if not state.get("enabled"):
                     return
+
+            self._refresh_remote_statuses()
+
+            if not forced:
                 next_run_at = iso_to_datetime(str(state.get("next_run_at") or ""))
                 if next_run_at and next_run_at > datetime.now(timezone.utc):
                     return
-
-            self._refresh_remote_statuses()
 
             next_item = self.post_queue.next_pending()
             if next_item is None:
@@ -783,6 +800,7 @@ class AutomationController:
             "segments": "",
             "clip_duration_sec": 30,
             "clips_count": 1,
+            "selection_offset": posted + pending_count,
             "frame_rate": "source",
             "language": "auto",
             "whisper_model": "small",

@@ -778,6 +778,7 @@ class WorkflowPipeline:
             "segments": str(payload.get("segments") or "").strip(),
             "clip_duration_sec": int(payload.get("clip_duration_sec") or 30),
             "clips_count": max(1, min(int(payload.get("clips_count") or 2), 8)),
+            "selection_offset": max(0, int(payload.get("selection_offset") or 0)),
             "frame_rate": str(payload.get("frame_rate") or "source").strip(),
             "language": str(payload.get("language") or "auto").strip(),
             "whisper_model": str(payload.get("whisper_model") or "small").strip(),
@@ -1178,6 +1179,7 @@ class WorkflowPipeline:
         duration = bundle.duration or self._probe_duration(job, bundle.source_path)
         clip_duration = float(request["clip_duration_sec"])
         clips_count = int(request["clips_count"])
+        selection_offset = int(request.get("selection_offset") or 0)
 
         if subtitle_entries and duration:
             job.log("Analyzing subtitle density and audio energy to find highlight moments.")
@@ -1187,6 +1189,7 @@ class WorkflowPipeline:
                 duration,
                 clip_duration,
                 clips_count,
+                selection_offset,
                 bundle.subtitle_path,
             )
             if segments:
@@ -1199,6 +1202,7 @@ class WorkflowPipeline:
                 duration,
                 clip_duration,
                 clips_count,
+                selection_offset,
             )
             if segments:
                 return segments, analysis
@@ -1745,6 +1749,7 @@ class WorkflowPipeline:
         duration: float,
         clip_duration: float,
         clips_count: int,
+        selection_offset: int,
         subtitle_path: Path | None,
     ) -> tuple[list[Segment], dict[str, Any]]:
         max_start = max(0.0, duration - clip_duration)
@@ -1816,7 +1821,7 @@ class WorkflowPipeline:
             )
 
         candidates.sort(key=lambda item: item["score"], reverse=True)
-        segments = self._select_segments(candidates, clips_count, clip_duration, "auto-highlight")
+        segments = self._select_segments(candidates, clips_count, clip_duration, "auto-highlight", selection_offset)
         return segments, {
             "method": "subtitles_plus_audio",
             "subtitle_source": subtitle_path.name if subtitle_path else None,
@@ -1830,6 +1835,7 @@ class WorkflowPipeline:
         duration: float,
         clip_duration: float,
         clips_count: int,
+        selection_offset: int,
     ) -> tuple[list[Segment], dict[str, Any]]:
         max_start = max(0.0, duration - clip_duration)
         stride = max(12.0, clip_duration * 0.6)
@@ -1863,7 +1869,7 @@ class WorkflowPipeline:
             )
 
         candidates.sort(key=lambda item: item["score"], reverse=True)
-        segments = self._select_segments(candidates, clips_count, clip_duration, "audio-highlight")
+        segments = self._select_segments(candidates, clips_count, clip_duration, "audio-highlight", selection_offset)
         return segments, {
             "method": "audio_only",
             "subtitle_source": None,
@@ -2066,9 +2072,11 @@ class WorkflowPipeline:
         clips_count: int,
         clip_duration: float,
         strategy: str,
+        selection_offset: int = 0,
     ) -> list[Segment]:
         selected: list[Segment] = []
         min_gap = max(4.0, clip_duration * 0.35)
+        target_count = selection_offset + clips_count
 
         for candidate in candidates:
             start = float(candidate["start"])
@@ -2091,9 +2099,10 @@ class WorkflowPipeline:
                     excerpt=str(candidate.get("excerpt") or ""),
                 )
             )
-            if len(selected) >= clips_count:
+            if len(selected) >= target_count:
                 break
 
+        selected = selected[selection_offset:target_count]
         return sorted(selected, key=lambda item: item.start)
 
     def _safe_float(self, value: Any) -> float | None:
