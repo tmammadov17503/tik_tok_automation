@@ -515,7 +515,10 @@ class AutomationController:
         if remaining <= 0:
             return
 
-        clip_paths = sorted(output_dir.glob("*_captioned.mp4"))[:remaining]
+        clip_paths = sorted(output_dir.glob("*_captioned.mp4"))
+        if not clip_paths:
+            clip_paths = sorted(output_dir.glob("*_vertical.mp4"))
+        clip_paths = clip_paths[:remaining]
         if not clip_paths:
             return
 
