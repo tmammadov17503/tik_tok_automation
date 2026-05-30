@@ -205,8 +205,8 @@ def files_match(left: Path, right: Path) -> bool:
 def ffmpeg_subtitles_filter(path: Path) -> str:
     escaped = str(path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", r"\'")
     style = (
-        "Fontname=Arial Black,Fontsize=18,Bold=1,Outline=3.0,Shadow=1.2,"
-        "Alignment=2,MarginL=60,MarginR=60,MarginV=42,BorderStyle=1,Spacing=0.15,WrapStyle=2,"
+        "Fontname=Arial Black,Fontsize=15,Bold=1,Outline=2.4,Shadow=0.9,"
+        "Alignment=2,MarginL=72,MarginR=72,MarginV=118,BorderStyle=1,Spacing=0.10,WrapStyle=2,"
         "PrimaryColour=&H00FFFFFF&,OutlineColour=&H00101010&,BackColour=&H00000000&"
     )
     return f"subtitles='{escaped}':force_style='{style}'"
@@ -260,6 +260,10 @@ def caption_key(text: str) -> str:
     return " ".join(re.findall(r"[0-9A-Za-z\u0400-\u04FF]+", text.lower()))
 
 
+def has_caption_letters(text: str) -> bool:
+    return bool(re.search(r"[A-Za-z\u0400-\u04FF]", text))
+
+
 def is_low_quality_caption(text: str) -> bool:
     key = caption_key(text)
     if not key:
@@ -267,6 +271,12 @@ def is_low_quality_caption(text: str) -> bool:
 
     tokens = key.split()
     if not tokens:
+        return True
+    if not has_caption_letters(key):
+        return True
+
+    numeric_tokens = sum(1 for token in tokens if token.isdigit())
+    if len(tokens) >= 3 and numeric_tokens / len(tokens) >= 0.55:
         return True
 
     if len(tokens) == 1:
@@ -648,6 +658,7 @@ class WorkflowPipeline:
 
         bundle = self._resolve_source(job, request, job_dir)
         job.log(f"Source resolved: {bundle.source_path}")
+        self._save_source_cache(job, request, bundle)
         source_width, source_height = self._probe_video_dimensions(job, bundle.source_path)
         if source_width and source_height:
             job.log(f"Source dimensions: {source_width}x{source_height}")
@@ -743,6 +754,36 @@ class WorkflowPipeline:
         if failed_items:
             job.log(f"Auto-cleanup skipped: {', '.join(failed_items)}")
 
+    def _save_source_cache(self, job: Any, request: dict[str, Any], bundle: SourceBundle) -> None:
+        raw_cache_dir = str(request.get("source_cache_dir") or "").strip()
+        if not raw_cache_dir:
+            return
+
+        cache_dir = Path(raw_cache_dir).expanduser().resolve()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        if bundle.source_path.resolve().parent == cache_dir:
+            return
+
+        target_source = cache_dir / f"source{bundle.source_path.suffix.lower() or '.mp4'}"
+        for old_source in cache_dir.glob("source.*"):
+            if old_source.suffix.lower() in {".mp4", ".mkv", ".mov", ".webm", ".m4v"} and old_source != target_source:
+                try:
+                    old_source.unlink()
+                except Exception:
+                    pass
+
+        if not files_match(bundle.source_path, target_source):
+            shutil.copy2(bundle.source_path, target_source)
+
+        if bundle.subtitle_path and bundle.subtitle_path.exists():
+            target_subtitle = cache_dir / f"source{bundle.subtitle_path.suffix.lower()}"
+            shutil.copy2(bundle.subtitle_path, target_subtitle)
+
+        if bundle.info_path and bundle.info_path.exists():
+            shutil.copy2(bundle.info_path, cache_dir / "source.info.json")
+
+        job.log("Cached source media for future scheduled clips.")
+
     def _cleanup_current_run_intermediates(
         self,
         job: Any,
@@ -785,6 +826,9 @@ class WorkflowPipeline:
             "add_captions": bool(payload.get("add_captions")),
             "publish_mode": str(payload.get("publish_mode") or "manual"),
             "rights_confirmed": bool(payload.get("rights_confirmed")),
+            "source_cache_dir": str(payload.get("source_cache_dir") or "").strip(),
+            "source_queue_id": str(payload.get("source_queue_id") or "").strip(),
+            "source_original_url": str(payload.get("source_original_url") or "").strip(),
         }
 
     def _validate_request(self, request: dict[str, Any]) -> None:
@@ -1397,11 +1441,16 @@ class WorkflowPipeline:
                 else:
                     subtitle_path = job_dir / f"{clip_path.stem}.srt"
                     if subtitle_path.exists():
-                        self._stylize_subtitle_file(subtitle_path, str(request.get("language") or "auto"))
+                        if not self._stylize_subtitle_file(subtitle_path, str(request.get("language") or "auto")):
+                            subtitle_path = None
 
             if subtitle_path is None and openai_transcription_available():
                 subtitle_label = "OpenAI"
                 subtitle_path = self._transcribe_clip_with_openai(job, clip_path, segment, request, job_dir)
+
+            if subtitle_path is None:
+                subtitle_label = "hook"
+                subtitle_path = self._write_hook_subtitles(job, clip_path, segment, request, job_dir)
 
             if subtitle_path is None or not subtitle_path.exists():
                 job.log(f"No subtitle file produced for {clip_path.name}; keeping plain clip.")
@@ -1433,12 +1482,16 @@ class WorkflowPipeline:
 
     def _vertical_filter_chain(self, subtitle_path: Path | None = None) -> str:
         filters = [
-            "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos",
-            "crop=1080:1920",
-            "eq=contrast=1.02:saturation=1.04",
-            "unsharp=5:5:0.55:5:5:0.05",
-            "setsar=1",
-            "format=yuv420p",
+            (
+                "split=2[bg][fg];"
+                "[bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
+                "crop=1080:1920,gblur=sigma=28,eq=brightness=-0.04:saturation=1.08[bg];"
+                "[fg]scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
+                "setsar=1[fg];"
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2,"
+                "eq=contrast=1.03:saturation=1.05,"
+                "unsharp=5:5:0.55:5:5:0.05,setsar=1,format=yuv420p"
+            )
         ]
         if subtitle_path is not None:
             filters.append(ffmpeg_subtitles_filter(subtitle_path))
@@ -1641,7 +1694,45 @@ class WorkflowPipeline:
                 encoding="utf-8",
             )
 
-        self._stylize_subtitle_file(subtitle_path, str(request.get("language") or "auto"))
+        if not self._stylize_subtitle_file(subtitle_path, str(request.get("language") or "auto")):
+            job.log(f"OpenAI transcription for {clip_path.name} was not usable as subtitles.")
+            return None
+        return subtitle_path
+
+    def _write_hook_subtitles(
+        self,
+        job: Any,
+        clip_path: Path,
+        segment: Segment,
+        request: dict[str, Any],
+        job_dir: Path,
+    ) -> Path | None:
+        duration = max(1.0, segment.duration)
+        if duration < 2.0:
+            return None
+
+        subtitle_path = job_dir / f"{clip_path.stem}_hook.srt"
+        first_end = min(duration, 2.8)
+        second_start = min(duration - 0.2, first_end + 0.25)
+        second_end = min(duration, second_start + 2.8)
+        cues = [
+            (0.0, first_end, "Wait for it 😂"),
+        ]
+        if second_end - second_start >= 1.0:
+            cues.append((second_start, second_end, "This part is wild"))
+
+        lines: list[str] = []
+        for index, (start, end, text) in enumerate(cues, start=1):
+            lines.extend(
+                [
+                    str(index),
+                    f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}",
+                    wrap_caption_text(text, max_line_chars=18, max_lines=2),
+                    "",
+                ]
+            )
+        subtitle_path.write_text("\n".join(lines), encoding="utf-8")
+        job.log(f"No usable speech subtitles for {clip_path.name}; adding a short hook overlay.")
         return subtitle_path
 
     def _build_metadata(
@@ -1904,7 +1995,7 @@ class WorkflowPipeline:
 
             text_lines = [line for line in lines if line != time_line and not line.isdigit()]
             caption = clean_caption_text(" ".join(text_lines))
-            if not caption:
+            if not caption or is_low_quality_caption(caption):
                 continue
             entries.append(SubtitleEntry(start=start, end=end, text=caption))
         return entries
@@ -1952,14 +2043,18 @@ class WorkflowPipeline:
         target.write_text("\n".join(lines), encoding="utf-8")
         return len(grouped_entries)
 
-    def _stylize_subtitle_file(self, subtitle_path: Path, language_hint: str) -> None:
+    def _stylize_subtitle_file(self, subtitle_path: Path, language_hint: str) -> bool:
         entries = [
             entry
             for entry in self._load_subtitles(subtitle_path)
             if not is_low_quality_caption(clean_caption_text(entry.text))
         ]
         if not entries:
-            return
+            try:
+                subtitle_path.unlink()
+            except Exception:
+                subtitle_path.write_text("", encoding="utf-8")
+            return False
 
         effective_hint = language_hint
         if effective_hint == "auto" and any(contains_cyrillic(entry.text) for entry in entries):
@@ -1981,6 +2076,7 @@ class WorkflowPipeline:
             )
             last_end = end
         subtitle_path.write_text("\n".join(lines), encoding="utf-8")
+        return True
 
     def _pick_subtitle_path(
         self,

@@ -441,6 +441,8 @@ class AutomationController:
         self.post_queue = PostQueueManager(root, default_hashtags)
         self.publisher = TikTokPublisher(auth_manager)
         self.state_path = root / ".secrets" / "automation_state.json"
+        self.source_cache_root = root / ".secrets" / "source_cache"
+        self.source_cache_root.mkdir(parents=True, exist_ok=True)
         self.max_pending_shares = env_int(
             "TIKTOK_MAX_PENDING_SHARES",
             DEFAULT_TIKTOK_MAX_PENDING_SHARES,
@@ -474,6 +476,26 @@ class AutomationController:
             self.notifier(message)
         except Exception:
             return
+
+    def _caption_hint_for_item(self, item: dict[str, Any]) -> str:
+        hashtags = [
+            str(tag).strip()
+            for tag in (item.get("hashtags") or self.post_queue.default_hashtags)
+            if str(tag).strip()
+        ]
+        return f"{' '.join(hashtags)} 😂".strip()
+
+    def _source_cache_dir(self, source_id: str) -> Path:
+        safe_id = "".join(char for char in source_id if char.isalnum() or char in {"-", "_"}) or "source"
+        return self.source_cache_root / safe_id
+
+    def _cached_source_path(self, source_id: str) -> Path | None:
+        cache_dir = self._source_cache_dir(source_id)
+        for suffix in (".mp4", ".mkv", ".mov", ".webm", ".m4v"):
+            candidate = cache_dir / f"source{suffix}"
+            if candidate.exists() and candidate.stat().st_size > 0:
+                return candidate.resolve()
+        return None
 
     def status(self) -> dict[str, Any]:
         state = self._read_state()
@@ -575,17 +597,16 @@ class AutomationController:
         return self.status()
 
     def on_workflow_completed(self, request: dict[str, Any], output_dir: Path) -> None:
-        if str(request.get("source_mode") or "") != "remote_url":
-            return
-
-        source_url = str(request.get("source_value") or "").strip()
-        if not source_url:
-            return
-
-        source_entry = next(
-            (item for item in self.sources.list_sources() if str(item.get("source_url") or "").strip() == source_url),
-            None,
-        )
+        source_id = str(request.get("source_queue_id") or "").strip()
+        source_url = str(request.get("source_original_url") or request.get("source_value") or "").strip()
+        source_entry = None
+        if source_id:
+            source_entry = next((item for item in self.sources.list_sources() if item.get("id") == source_id), None)
+        if source_entry is None and source_url:
+            source_entry = next(
+                (item for item in self.sources.list_sources() if str(item.get("source_url") or "").strip() == source_url),
+                None,
+            )
         if source_entry is None:
             return
 
@@ -759,7 +780,8 @@ class AutomationController:
                 if not was_already_delivered:
                     self.notify(
                         f"Video sent to TikTok inbox: {item.get('clip_label') or 'generated clip'}. "
-                        f"{self.source_progress_line(str(item.get('source_id') or ''))}"
+                        f"{self.source_progress_line(str(item.get('source_id') or ''))}\n"
+                        f"Caption: {self._caption_hint_for_item(item)}"
                     )
             elif remote_status in {"PROCESSING_UPLOAD", "PROCESSING_DOWNLOAD"}:
                 self.post_queue.update_item(
@@ -792,11 +814,17 @@ class AutomationController:
         if remaining <= 0:
             return
 
+        cache_dir = self._source_cache_dir(source_id)
+        cached_source = self._cached_source_path(source_id)
+        source_url = str(source_entry.get("source_url") or "")
         request = {
             "project_name": source_entry.get("title") or "Queued Source",
             "topic": source_entry.get("title") or "Queued source clip",
-            "source_mode": "remote_url",
-            "source_value": source_entry.get("source_url") or "",
+            "source_mode": "local_file" if cached_source else "remote_url",
+            "source_value": str(cached_source) if cached_source else source_url,
+            "source_queue_id": source_id,
+            "source_original_url": source_url,
+            "source_cache_dir": str(cache_dir),
             "segments": "",
             "clip_duration_sec": 30,
             "clips_count": 1,
@@ -895,7 +923,8 @@ class AutomationController:
         if queue_status == "sent_to_inbox":
             self.notify(
                 f"Video sent to TikTok inbox: {item.get('clip_label') or 'generated clip'}. "
-                f"{self.source_progress_line(str(item.get('source_id') or ''))}"
+                f"{self.source_progress_line(str(item.get('source_id') or ''))}\n"
+                f"Caption: {self._caption_hint_for_item(item)}"
             )
 
     def _mark_item_posted(self, item: dict[str, Any], remote_status: str, *, notify: bool = True) -> None:
@@ -938,6 +967,7 @@ class AutomationController:
         )
         if posted >= planned and not active_left:
             self.sources.remove_source(source_id)
+            shutil.rmtree(self._source_cache_dir(source_id), ignore_errors=True)
             self.append_log(f"{source_entry.get('title') or source_entry.get('source_url')} finished and was removed from the source queue.")
 
     def _read_state(self) -> dict[str, Any]:
