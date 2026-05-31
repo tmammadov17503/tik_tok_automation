@@ -205,8 +205,8 @@ def files_match(left: Path, right: Path) -> bool:
 def ffmpeg_subtitles_filter(path: Path) -> str:
     escaped = str(path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", r"\'")
     style = (
-        "Fontname=Arial Black,Fontsize=10,Bold=1,Outline=1.9,Shadow=0.7,"
-        "Alignment=2,MarginL=180,MarginR=250,MarginV=108,BorderStyle=1,Spacing=0.06,WrapStyle=2,"
+        "Fontname=Arial Black,Fontsize=8,Bold=1,Outline=1.55,Shadow=0.55,"
+        "Alignment=2,MarginL=235,MarginR=315,MarginV=108,BorderStyle=1,Spacing=0.04,WrapStyle=2,"
         "PrimaryColour=&H00FFFFFF&,OutlineColour=&H00101010&,BackColour=&H00000000&"
     )
     return f"subtitles='{escaped}':force_style='{style}'"
@@ -511,7 +511,7 @@ def decorate_subtitle_text(text: str, line_index: int, language_hint: str) -> st
         return clean
 
     clean = clean.replace("...", "\u2026")
-    clean = wrap_caption_text(clean, max_line_chars=14, max_lines=2)
+    clean = wrap_caption_text(clean, max_line_chars=12, max_lines=3)
 
     emoji = ""
     lower = clean.lower()
@@ -1778,7 +1778,7 @@ class WorkflowPipeline:
                 [
                     str(index),
                     f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}",
-                    wrap_caption_text(text, max_line_chars=14, max_lines=2),
+                    wrap_caption_text(text, max_line_chars=12, max_lines=3),
                     "",
                 ]
             )
