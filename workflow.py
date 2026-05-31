@@ -205,8 +205,8 @@ def files_match(left: Path, right: Path) -> bool:
 def ffmpeg_subtitles_filter(path: Path) -> str:
     escaped = str(path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", r"\'")
     style = (
-        "Fontname=Arial Black,Fontsize=12,Bold=1,Outline=2.1,Shadow=0.8,"
-        "Alignment=2,MarginL=72,MarginR=72,MarginV=108,BorderStyle=1,Spacing=0.08,WrapStyle=2,"
+        "Fontname=Arial Black,Fontsize=10,Bold=1,Outline=1.9,Shadow=0.7,"
+        "Alignment=2,MarginL=180,MarginR=250,MarginV=108,BorderStyle=1,Spacing=0.06,WrapStyle=2,"
         "PrimaryColour=&H00FFFFFF&,OutlineColour=&H00101010&,BackColour=&H00000000&"
     )
     return f"subtitles='{escaped}':force_style='{style}'"
@@ -511,7 +511,7 @@ def decorate_subtitle_text(text: str, line_index: int, language_hint: str) -> st
         return clean
 
     clean = clean.replace("...", "\u2026")
-    clean = wrap_caption_text(clean, max_line_chars=19, max_lines=2)
+    clean = wrap_caption_text(clean, max_line_chars=14, max_lines=2)
 
     emoji = ""
     lower = clean.lower()
@@ -1511,7 +1511,7 @@ class WorkflowPipeline:
                 "split=2[bg][fg];"
                 "[bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
                 "crop=1080:1920,gblur=sigma=28,eq=brightness=-0.04:saturation=1.08[bg];"
-                "[fg]scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
+                "[fg]scale=900:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
                 "setsar=1[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2,"
                 "eq=contrast=1.03:saturation=1.05,"
@@ -1543,6 +1543,8 @@ class WorkflowPipeline:
             f"{max(1.0, segment.duration):.3f}",
             "-vf",
             self._vertical_filter_chain(subtitle_path),
+            "-af",
+            "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
             "-map",
             "0:v:0?",
             "-map",
@@ -1551,8 +1553,16 @@ class WorkflowPipeline:
             "libx264",
             "-preset",
             "veryfast",
+            "-tune",
+            "fastdecode",
             "-crf",
             "14",
+            "-g",
+            "50",
+            "-keyint_min",
+            "25",
+            "-bf",
+            "0",
             "-maxrate",
             "18M",
             "-bufsize",
@@ -1567,6 +1577,8 @@ class WorkflowPipeline:
             "aac",
             "-b:a",
             "192k",
+            "-avoid_negative_ts",
+            "make_zero",
             "-movflags",
             "+faststart",
             str(output_path),
@@ -1600,6 +1612,8 @@ class WorkflowPipeline:
             str(clip_path),
             "-vf",
             self._caption_overlay_filter_chain(subtitle_path, request),
+            "-af",
+            "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
             "-map",
             "0:v:0?",
             "-map",
@@ -1608,9 +1622,17 @@ class WorkflowPipeline:
             "libx264",
             "-preset",
             "veryfast",
+            "-tune",
+            "fastdecode",
             "-crf",
             "14",
             *([] if target_fps is None else ["-r", str(target_fps)]),
+            "-g",
+            "50",
+            "-keyint_min",
+            "25",
+            "-bf",
+            "0",
             "-maxrate",
             "18M",
             "-bufsize",
@@ -1622,7 +1644,11 @@ class WorkflowPipeline:
             "-pix_fmt",
             "yuv420p",
             "-c:a",
-            "copy",
+            "aac",
+            "-b:a",
+            "192k",
+            "-avoid_negative_ts",
+            "make_zero",
             "-movflags",
             "+faststart",
             str(output_path),
@@ -1752,7 +1778,7 @@ class WorkflowPipeline:
                 [
                     str(index),
                     f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}",
-                    wrap_caption_text(text, max_line_chars=18, max_lines=2),
+                    wrap_caption_text(text, max_line_chars=14, max_lines=2),
                     "",
                 ]
             )
