@@ -292,6 +292,8 @@ def is_low_quality_caption(text: str) -> bool:
     key = caption_key(text)
     if not key:
         return True
+    if re.search(r"(?iu)\b(?:редактор\s+субтитров|корректор|subtitle\s+editor|subtitles\s+by)\b", key):
+        return True
 
     tokens = key.split()
     if not tokens:
@@ -385,6 +387,14 @@ def merge_caption_text(current: str, candidate: str, max_chars: int) -> str | No
     return merged if len(merged) <= max_chars else None
 
 
+def shorten_caption_word(word: str, max_line_chars: int) -> str:
+    if len(word) <= max_line_chars:
+        return word
+    if max_line_chars <= 1:
+        return word[:max_line_chars]
+    return word[: max_line_chars - 1].rstrip() + "\u2026"
+
+
 def wrap_caption_text(text: str, max_line_chars: int = 19, max_lines: int = 2) -> str:
     words = text.split()
     if not words:
@@ -392,23 +402,42 @@ def wrap_caption_text(text: str, max_line_chars: int = 19, max_lines: int = 2) -
 
     lines: list[str] = []
     current: list[str] = []
+    truncated = False
     for word in words:
+        word = shorten_caption_word(word, max_line_chars)
         candidate = " ".join(current + [word])
-        if current and len(candidate) > max_line_chars and len(lines) < max_lines - 1:
+        if current and len(candidate) > max_line_chars:
             lines.append(" ".join(current))
+            if len(lines) >= max_lines:
+                truncated = True
+                break
             current = [word]
         else:
             current.append(word)
 
-    if current:
+    if current and len(lines) < max_lines:
         lines.append(" ".join(current))
 
-    if len(lines) > max_lines:
-        head = lines[: max_lines - 1]
-        tail = " ".join(lines[max_lines - 1 :])
-        lines = head + [tail]
+    if truncated and lines:
+        lines[-1] = lines[-1].rstrip(".\u2026") + "\u2026"
 
     return "\n".join(line.strip() for line in lines if line.strip())
+
+
+def split_caption_chunks(text: str, max_chars: int = 34) -> list[str]:
+    words = text.split()
+    chunks: list[str] = []
+    current: list[str] = []
+    for word in words:
+        candidate = " ".join(current + [word])
+        if current and len(candidate) > max_chars:
+            chunks.append(" ".join(current))
+            current = [word]
+        else:
+            current.append(word)
+    if current:
+        chunks.append(" ".join(current))
+    return chunks or [text]
 
 
 def without_proxy_env() -> dict[str, str]:
@@ -2302,19 +2331,39 @@ class WorkflowPipeline:
 
         lines = []
         last_end = 0.0
-        for index, entry in enumerate(entries, start=1):
-            start, end = retime_subtitle_window(entry.start, entry.end)
-            start = max(start, last_end + (0.02 if index > 1 else 0.0))
-            end = max(start + 0.28, end)
-            lines.extend(
-                [
-                    str(index),
-                    f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}",
-                    decorate_subtitle_text(entry.text, index, effective_hint),
-                    "",
-                ]
-            )
-            last_end = end
+        cue_index = 1
+        for entry in entries:
+            chunks = [
+                chunk
+                for chunk in split_caption_chunks(clean_caption_text(entry.text), max_chars=34)
+                if not is_low_quality_caption(chunk)
+            ]
+            if not chunks:
+                continue
+            entry_duration = max(0.7, entry.end - entry.start)
+            chunk_duration = max(0.62, entry_duration / len(chunks))
+            for chunk_offset, chunk in enumerate(chunks):
+                raw_start = entry.start + (chunk_offset * chunk_duration)
+                raw_end = min(entry.end, raw_start + chunk_duration)
+                start, end = retime_subtitle_window(raw_start, raw_end)
+                start = max(start, last_end + (0.02 if cue_index > 1 else 0.0))
+                end = max(start + 0.28, end)
+                lines.extend(
+                    [
+                        str(cue_index),
+                        f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}",
+                        decorate_subtitle_text(chunk, cue_index, effective_hint),
+                        "",
+                    ]
+                )
+                cue_index += 1
+                last_end = end
+        if not lines:
+            try:
+                subtitle_path.unlink()
+            except Exception:
+                subtitle_path.write_text("", encoding="utf-8")
+            return False
         subtitle_path.write_text("\n".join(lines), encoding="utf-8")
         return True
 
