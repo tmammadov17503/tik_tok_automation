@@ -84,6 +84,13 @@ def safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
 def is_retryable_tiktok_error(error: BaseException) -> bool:
     message = str(error).lower()
     if any(hint in message for hint in NON_RETRYABLE_ERROR_HINTS):
@@ -191,6 +198,7 @@ class PostQueueManager:
         clip_paths: list[Path],
         *,
         start_index: int | None = None,
+        segments: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         if not clip_paths:
             return self.list_items()
@@ -205,6 +213,7 @@ class PostQueueManager:
             }
 
             for offset, clip_path in enumerate(clip_paths):
+                segment = (segments or [])[offset] if offset < len(segments or []) else {}
                 original_name = clip_path.name
                 clip_label = clip_path.stem
                 if start_index is not None:
@@ -231,6 +240,8 @@ class PostQueueManager:
                             "clip_label": clip_label,
                             "clip_path": str(stored_path),
                             "original_name": original_name,
+                            "segment_start": segment.get("start_seconds"),
+                            "segment_end": segment.get("end_seconds"),
                             "status": "pending",
                             "hashtags": list(self.default_hashtags),
                             "created_at": now,
@@ -322,6 +333,8 @@ class PostQueueManager:
             "clip_label": str(item.get("clip_label") or "Queued clip"),
             "clip_path": str(item.get("clip_path") or ""),
             "original_name": str(item.get("original_name") or ""),
+            "segment_start": safe_float(item.get("segment_start"), 0.0),
+            "segment_end": safe_float(item.get("segment_end"), 0.0),
             "status": str(item.get("status") or "pending"),
             "publish_id": str(item.get("publish_id") or ""),
             "tiktok_status": str(item.get("tiktok_status") or ""),
@@ -497,6 +510,17 @@ class AutomationController:
                 return candidate.resolve()
         return None
 
+    def _used_segments_for_source(self, source_id: str) -> list[dict[str, float]]:
+        ranges: list[dict[str, float]] = []
+        for item in self.post_queue.items_for_source(source_id):
+            if item.get("status") not in POST_QUEUE_KEEP_STATES:
+                continue
+            start = safe_float(item.get("segment_start"), 0.0)
+            end = safe_float(item.get("segment_end"), 0.0)
+            if end > start:
+                ranges.append({"start": start, "end": end})
+        return ranges
+
     def status(self) -> dict[str, Any]:
         state = self._read_state()
         queue_items = self.post_queue.list_items()
@@ -625,8 +649,14 @@ class AutomationController:
         if not clip_paths:
             return
 
-        start_index = safe_int(request.get("selection_offset"), posted + pending_count) + 1
-        self.post_queue.enqueue_clip_files(source_entry, clip_paths, start_index=start_index)
+        segments = self._read_segments_for_output(output_dir)
+        start_index = posted + pending_count + 1
+        self.post_queue.enqueue_clip_files(
+            source_entry,
+            clip_paths,
+            start_index=start_index,
+            segments=segments,
+        )
         caption_note = "with subtitles" if captioned else "without subtitles"
         self.append_log(
             f"Queued {len(clip_paths)} clip(s) from {source_entry.get('title') or source_url} for TikTok upload."
@@ -635,6 +665,13 @@ class AutomationController:
             f"Created {len(clip_paths)} video(s) {caption_note} from {source_entry.get('title') or source_url}. "
             f"{self.source_progress_line(str(source_entry.get('id') or ''))}"
         )
+
+    def _read_segments_for_output(self, output_dir: Path) -> list[dict[str, Any]]:
+        try:
+            payload = json.loads((output_dir / "segments.json").read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
 
     def append_log(self, message: str) -> None:
         with self._lock:
@@ -817,6 +854,7 @@ class AutomationController:
         cache_dir = self._source_cache_dir(source_id)
         cached_source = self._cached_source_path(source_id)
         source_url = str(source_entry.get("source_url") or "")
+        excluded_segments = self._used_segments_for_source(source_id)
         request = {
             "project_name": source_entry.get("title") or "Queued Source",
             "topic": source_entry.get("title") or "Queued source clip",
@@ -825,10 +863,11 @@ class AutomationController:
             "source_queue_id": source_id,
             "source_original_url": source_url,
             "source_cache_dir": str(cache_dir),
+            "excluded_segments": excluded_segments,
             "segments": "",
             "clip_duration_sec": 30,
             "clips_count": 1,
-            "selection_offset": posted + pending_count,
+            "selection_offset": 0 if excluded_segments else posted + pending_count,
             "frame_rate": "source",
             "language": "auto",
             "whisper_model": "small",

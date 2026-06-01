@@ -143,6 +143,25 @@ def parse_clock_seconds(raw: str) -> float:
     return hours * 3600 + minutes * 60 + seconds
 
 
+def normalize_excluded_segments(raw: Any) -> list[dict[str, float]]:
+    if not isinstance(raw, list):
+        return []
+
+    ranges: list[dict[str, float]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = float(item.get("start"))
+            end = float(item.get("end"))
+        except Exception:
+            continue
+        if end <= start:
+            continue
+        ranges.append({"start": max(0.0, start), "end": max(0.0, end)})
+    return ranges
+
+
 def seconds_to_clock(value: float) -> str:
     total = max(0, int(round(value)))
     hours = total // 3600
@@ -840,6 +859,7 @@ class WorkflowPipeline:
             "source_cache_dir": str(payload.get("source_cache_dir") or "").strip(),
             "source_queue_id": str(payload.get("source_queue_id") or "").strip(),
             "source_original_url": str(payload.get("source_original_url") or "").strip(),
+            "excluded_segments": normalize_excluded_segments(payload.get("excluded_segments")),
             "hashtags": [
                 str(tag).strip()
                 for tag in (payload.get("hashtags") or [])
@@ -1245,6 +1265,11 @@ class WorkflowPipeline:
         clip_duration = float(request["clip_duration_sec"])
         clips_count = int(request["clips_count"])
         selection_offset = int(request.get("selection_offset") or 0)
+        excluded_ranges = [
+            (float(item["start"]), float(item["end"]))
+            for item in request.get("excluded_segments") or []
+        ]
+        effective_offset = 0 if excluded_ranges else selection_offset
 
         if subtitle_entries and duration:
             job.log("Analyzing subtitle density and audio energy to find highlight moments.")
@@ -1254,7 +1279,8 @@ class WorkflowPipeline:
                 duration,
                 clip_duration,
                 clips_count,
-                selection_offset,
+                effective_offset,
+                excluded_ranges,
                 bundle.subtitle_path,
             )
             if segments:
@@ -1270,7 +1296,8 @@ class WorkflowPipeline:
                 duration,
                 clip_duration,
                 clips_count,
-                selection_offset,
+                effective_offset,
+                excluded_ranges,
                 job_dir,
             )
             if segments:
@@ -1508,12 +1535,8 @@ class WorkflowPipeline:
     def _vertical_filter_chain(self, subtitle_path: Path | None = None) -> str:
         filters = [
             (
-                "split=2[bg][fg];"
-                "[bg]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
-                "crop=1080:1920,gblur=sigma=28,eq=brightness=-0.04:saturation=1.08[bg];"
-                "[fg]scale=900:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
-                "setsar=1[fg];"
-                "[bg][fg]overlay=(W-w)/2:(H-h)/2,"
+                "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
+                "crop=1080:1920:(iw-1080)/2:(ih-1920)/2,"
                 "eq=contrast=1.03:saturation=1.05,"
                 "unsharp=5:5:0.55:5:5:0.05,setsar=1,format=yuv420p"
             )
@@ -1902,6 +1925,7 @@ class WorkflowPipeline:
         clip_duration: float,
         clips_count: int,
         selection_offset: int,
+        excluded_ranges: list[tuple[float, float]],
         subtitle_path: Path | None,
     ) -> tuple[list[Segment], dict[str, Any]]:
         max_start = max(0.0, duration - clip_duration)
@@ -1973,7 +1997,14 @@ class WorkflowPipeline:
             )
 
         candidates.sort(key=lambda item: item["score"], reverse=True)
-        segments = self._select_segments(candidates, clips_count, clip_duration, "auto-highlight", selection_offset)
+        segments = self._select_segments(
+            candidates,
+            clips_count,
+            clip_duration,
+            "auto-highlight",
+            selection_offset,
+            excluded_ranges,
+        )
         return segments, {
             "method": "subtitles_plus_audio",
             "subtitle_source": subtitle_path.name if subtitle_path else None,
@@ -1991,6 +2022,7 @@ class WorkflowPipeline:
         clip_duration: float,
         clips_count: int,
         selection_offset: int,
+        excluded_ranges: list[tuple[float, float]],
         job_dir: Path,
     ) -> tuple[list[Segment], dict[str, Any]]:
         max_start = max(0.0, duration - clip_duration)
@@ -2040,7 +2072,14 @@ class WorkflowPipeline:
             candidates.sort(key=lambda item: item["score"], reverse=True)
 
         strategy = "dialogue-highlight" if method == "audio_plus_openai_dialogue" else "audio-highlight"
-        segments = self._select_segments(candidates, clips_count, clip_duration, strategy, selection_offset)
+        segments = self._select_segments(
+            candidates,
+            clips_count,
+            clip_duration,
+            strategy,
+            selection_offset,
+            excluded_ranges,
+        )
         return segments, {
             "method": method,
             "subtitle_source": None,
@@ -2370,15 +2409,23 @@ class WorkflowPipeline:
         clip_duration: float,
         strategy: str,
         selection_offset: int = 0,
+        excluded_ranges: list[tuple[float, float]] | None = None,
     ) -> list[Segment]:
         selected: list[Segment] = []
         min_gap = max(4.0, clip_duration * 0.35)
         target_count = selection_offset + clips_count
+        blocked_ranges = excluded_ranges or []
 
         for candidate in candidates:
             start = float(candidate["start"])
             end = float(candidate["end"])
             allowed = True
+            for blocked_start, blocked_end in blocked_ranges:
+                if overlaps(start - min_gap, end + min_gap, blocked_start, blocked_end):
+                    allowed = False
+                    break
+            if not allowed:
+                continue
             for existing in selected:
                 if overlaps(start - min_gap, end + min_gap, existing.start, existing.end):
                     allowed = False
