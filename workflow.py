@@ -18,6 +18,10 @@ DURATION_PATTERN = re.compile(r"Duration:\s*(\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)")
 VIDEO_STREAM_PATTERN = re.compile(r"Video:.*?(\d{2,5})x(\d{2,5})")
 MEAN_VOLUME_PATTERN = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
 MAX_VOLUME_PATTERN = re.compile(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
+CAPTION_LINE_CHARS = 10
+CAPTION_MAX_LINES = 3
+CAPTION_CHUNK_CHARS = 28
+RENDER_SEEK_PREROLL_SECONDS = 5.0
 NON_SPEECH_PATTERN = re.compile(
     r"(?iu)(?:\[(?:музыка|music|аплодисменты|applause|смех|laughter|шум|noise|вздохи?|sighs?|кашель|coughing)\]"
     r"|\((?:музыка|music|аплодисменты|applause|смех|laughter|шум|noise|вздохи?|sighs?|кашель|coughing)\))"
@@ -224,8 +228,8 @@ def files_match(left: Path, right: Path) -> bool:
 def ffmpeg_subtitles_filter(path: Path) -> str:
     escaped = str(path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", r"\'")
     style = (
-        "Fontname=Arial Black,Fontsize=8,Bold=1,Outline=1.55,Shadow=0.55,"
-        "Alignment=2,MarginL=235,MarginR=315,MarginV=108,BorderStyle=1,Spacing=0.04,WrapStyle=2,"
+        "Fontname=Arial Black,Fontsize=9.5,Bold=1,Outline=1.75,Shadow=0.6,"
+        "Alignment=2,MarginL=220,MarginR=220,MarginV=92,BorderStyle=1,Spacing=0.04,WrapStyle=2,"
         "PrimaryColour=&H00FFFFFF&,OutlineColour=&H00101010&,BackColour=&H00000000&"
     )
     return f"subtitles='{escaped}':force_style='{style}'"
@@ -559,7 +563,7 @@ def decorate_subtitle_text(text: str, line_index: int, language_hint: str) -> st
         return clean
 
     clean = clean.replace("...", "\u2026")
-    clean = wrap_caption_text(clean, max_line_chars=12, max_lines=3)
+    clean = wrap_caption_text(clean, max_line_chars=CAPTION_LINE_CHARS, max_lines=CAPTION_MAX_LINES)
 
     emoji = ""
     lower = clean.lower()
@@ -1567,7 +1571,7 @@ class WorkflowPipeline:
                 "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
                 "crop=1080:1920:(iw-1080)/2:(ih-1920)/2,"
                 "eq=contrast=1.03:saturation=1.05,"
-                "unsharp=5:5:0.55:5:5:0.05,setsar=1,format=yuv420p"
+                "unsharp=5:5:0.55:5:5:0.05,setpts=PTS-STARTPTS,setsar=1,format=yuv420p"
             )
         ]
         if subtitle_path is not None:
@@ -1585,12 +1589,19 @@ class WorkflowPipeline:
         ffmpeg = ffmpeg_command()
         if ffmpeg is None:
             raise RuntimeError("ffmpeg is not installed.")
+        seek_preroll = min(max(0.0, segment.start), RENDER_SEEK_PREROLL_SECONDS)
+        input_seek = max(0.0, segment.start - seek_preroll)
+        accurate_seek = segment.start - input_seek
         return ffmpeg + [
             "-y",
+            "-fflags",
+            "+genpts",
             "-ss",
-            seconds_to_ffmpeg_time(segment.start),
+            seconds_to_ffmpeg_time(input_seek),
             "-i",
             str(source_path),
+            "-ss",
+            f"{accurate_seek:.3f}",
             "-t",
             f"{max(1.0, segment.duration):.3f}",
             "-vf",
@@ -1637,7 +1648,7 @@ class WorkflowPipeline:
         ]
 
     def _caption_overlay_filter_chain(self, subtitle_path: Path, request: dict[str, Any]) -> str:
-        filters: list[str] = []
+        filters: list[str] = ["setpts=PTS-STARTPTS"]
         target_fps = requested_output_fps(request)
         if target_fps is not None:
             filters.append(
@@ -1660,6 +1671,8 @@ class WorkflowPipeline:
         target_fps = requested_output_fps(request)
         return ffmpeg + [
             "-y",
+            "-fflags",
+            "+genpts",
             "-i",
             str(clip_path),
             "-vf",
@@ -1830,7 +1843,7 @@ class WorkflowPipeline:
                 [
                     str(index),
                     f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}",
-                    wrap_caption_text(text, max_line_chars=12, max_lines=3),
+                    wrap_caption_text(text, max_line_chars=CAPTION_LINE_CHARS, max_lines=CAPTION_MAX_LINES),
                     "",
                 ]
             )
@@ -2335,7 +2348,7 @@ class WorkflowPipeline:
         for entry in entries:
             chunks = [
                 chunk
-                for chunk in split_caption_chunks(clean_caption_text(entry.text), max_chars=34)
+                for chunk in split_caption_chunks(clean_caption_text(entry.text), max_chars=CAPTION_CHUNK_CHARS)
                 if not is_low_quality_caption(chunk)
             ]
             if not chunks:
