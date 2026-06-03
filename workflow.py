@@ -18,10 +18,15 @@ DURATION_PATTERN = re.compile(r"Duration:\s*(\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)")
 VIDEO_STREAM_PATTERN = re.compile(r"Video:.*?(\d{2,5})x(\d{2,5})")
 MEAN_VOLUME_PATTERN = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
 MAX_VOLUME_PATTERN = re.compile(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
-CAPTION_LINE_CHARS = 10
+CAPTION_LINE_CHARS = 9
 CAPTION_MAX_LINES = 3
-CAPTION_CHUNK_CHARS = 28
+CAPTION_CHUNK_CHARS = 25
 RENDER_SEEK_PREROLL_SECONDS = 5.0
+VIDEO_OUTPUT_FPS = 25
+ASS_WHITE = r"{\1c&H00FFFFFF&}"
+ASS_YELLOW = r"{\1c&H0000FFFF&}"
+ASS_RED = r"{\1c&H00303BFF&}"
+ASS_POP = r"{\fad(70,90)}"
 NON_SPEECH_PATTERN = re.compile(
     r"(?iu)(?:\[(?:музыка|music|аплодисменты|applause|смех|laughter|шум|noise|вздохи?|sighs?|кашель|coughing)\]"
     r"|\((?:музыка|music|аплодисменты|applause|смех|laughter|шум|noise|вздохи?|sighs?|кашель|coughing)\))"
@@ -192,6 +197,16 @@ def seconds_to_srt_time(value: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
 
+def seconds_to_ass_time(value: float) -> str:
+    bounded = max(0.0, value)
+    total_cs = int(round(bounded * 100))
+    hours = total_cs // 360_000
+    minutes = (total_cs % 360_000) // 6_000
+    seconds = (total_cs % 6_000) // 100
+    centis = total_cs % 100
+    return f"{hours}:{minutes:02d}:{seconds:02d}.{centis:02d}"
+
+
 def run_command(
     command: list[str],
     cwd: Path | None = None,
@@ -227,9 +242,11 @@ def files_match(left: Path, right: Path) -> bool:
 
 def ffmpeg_subtitles_filter(path: Path) -> str:
     escaped = str(path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", r"\'")
+    if path.suffix.lower() == ".ass":
+        return f"subtitles='{escaped}'"
     style = (
-        "Fontname=Arial Black,Fontsize=9.5,Bold=1,Outline=1.75,Shadow=0.6,"
-        "Alignment=2,MarginL=220,MarginR=220,MarginV=92,BorderStyle=1,Spacing=0.04,WrapStyle=2,"
+        "Fontname=Arial Black,Fontsize=10.4,Bold=1,Outline=1.9,Shadow=0.65,"
+        "Alignment=2,MarginL=220,MarginR=220,MarginV=76,BorderStyle=1,Spacing=0.04,WrapStyle=2,"
         "PrimaryColour=&H00FFFFFF&,OutlineColour=&H00101010&,BackColour=&H00000000&"
     )
     return f"subtitles='{escaped}':force_style='{style}'"
@@ -444,6 +461,82 @@ def split_caption_chunks(text: str, max_chars: int = 34) -> list[str]:
     return chunks or [text]
 
 
+def _caption_word_match(token: str) -> re.Match[str] | None:
+    return re.match(r"(?u)^([^\w\u0400-\u04FF]*)([\w\u0400-\u04FF]{4,})(.*)$", token)
+
+
+def _color_caption_token(token: str, color: str) -> str:
+    match = _caption_word_match(token)
+    if not match:
+        return token
+    prefix, word, suffix = match.groups()
+    return f"{prefix}{color}{word}{ASS_WHITE}{suffix}"
+
+
+def add_caption_emphasis(text: str, line_index: int) -> str:
+    tokens = re.split(r"(\s+)", text)
+    candidates: list[tuple[int, int]] = []
+    for index, token in enumerate(tokens):
+        match = _caption_word_match(token)
+        if not match:
+            continue
+        candidates.append((index, len(match.group(2))))
+
+    if not candidates:
+        return text
+
+    selected: set[int] = set()
+    first_index = candidates[(line_index - 1) % len(candidates)][0]
+    selected.add(first_index)
+    tokens[first_index] = _color_caption_token(
+        tokens[first_index],
+        ASS_RED if line_index % 3 == 0 else ASS_YELLOW,
+    )
+
+    if len(candidates) >= 4 and line_index % 5 == 0:
+        second_index = max(
+            (candidate for candidate in candidates if candidate[0] not in selected),
+            key=lambda item: item[1],
+        )[0]
+        tokens[second_index] = _color_caption_token(tokens[second_index], ASS_RED)
+
+    return "".join(tokens)
+
+
+def ass_text(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", r"\N")
+
+
+def write_ass_subtitles(target: Path, cues: list[tuple[float, float, str]]) -> None:
+    header = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "PlayResX: 1080",
+        "PlayResY: 1920",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        (
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+            "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+            "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding"
+        ),
+        (
+            "Style: Default,Arial Black,78,&H00FFFFFF,&H00FFFFFF,&H00101010,&H00000000,"
+            "-1,0,0,0,100,100,0.04,0,1,7,2.3,2,220,220,480,1"
+        ),
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    events = [
+        f"Dialogue: 0,{seconds_to_ass_time(start)},{seconds_to_ass_time(end)},Default,,0,0,0,,{ass_text(text)}"
+        for start, end, text in cues
+        if end > start
+    ]
+    target.write_text("\n".join(header + events) + "\n", encoding="utf-8")
+
+
 def without_proxy_env() -> dict[str, str]:
     env = dict(os.environ)
     for key in [
@@ -581,6 +674,12 @@ def decorate_subtitle_text(text: str, line_index: int, language_hint: str) -> st
             emoji = " \u2764\ufe0f"
         elif any(token in lower for token in ["\u0434\u0435\u043d\u044c\u0433\u0438", "\u0432\u043b\u0430\u0441\u0442\u044c", "money", "power", "win"]):
             emoji = " \U0001F525"
+    elif line_index % 5 == 0:
+        emoji = " \U0001F602"
+
+    clean = add_caption_emphasis(clean, line_index)
+    if line_index % 4 == 0 or emoji:
+        clean = ASS_POP + clean
 
     if is_russian:
         return clean + emoji
@@ -1481,7 +1580,7 @@ class WorkflowPipeline:
             subtitle_label = "source"
 
             if subtitle_entries:
-                fallback_subtitle_path = job_dir / f"{clip_path.stem}.srt"
+                fallback_subtitle_path = job_dir / f"{clip_path.stem}.ass"
                 written = self._write_segment_subtitles(subtitle_entries, segment, fallback_subtitle_path)
                 if written:
                     subtitle_path = fallback_subtitle_path
@@ -1526,7 +1625,11 @@ class WorkflowPipeline:
                 else:
                     subtitle_path = job_dir / f"{clip_path.stem}.srt"
                     if subtitle_path.exists():
-                        if not self._stylize_subtitle_file(subtitle_path, str(request.get("language") or "auto")):
+                        subtitle_path = self._stylize_subtitle_file(
+                            subtitle_path,
+                            str(request.get("language") or "auto"),
+                        )
+                        if subtitle_path is None:
                             subtitle_path = None
 
             if subtitle_path is None and openai_transcription_available():
@@ -1571,7 +1674,8 @@ class WorkflowPipeline:
                 "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
                 "crop=1080:1920:(iw-1080)/2:(ih-1920)/2,"
                 "eq=contrast=1.03:saturation=1.05,"
-                "unsharp=5:5:0.55:5:5:0.05,setpts=PTS-STARTPTS,setsar=1,format=yuv420p"
+                f"unsharp=5:5:0.55:5:5:0.05,fps={VIDEO_OUTPUT_FPS}:start_time=0,"
+                f"setpts=N/({VIDEO_OUTPUT_FPS}*TB),setsar=1,format=yuv420p"
             )
         ]
         if subtitle_path is not None:
@@ -1607,7 +1711,7 @@ class WorkflowPipeline:
             "-vf",
             self._vertical_filter_chain(subtitle_path),
             "-af",
-            "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
+            "asetpts=PTS-STARTPTS,aresample=async=1000:min_hard_comp=0.100:first_pts=0",
             "-map",
             "0:v:0?",
             "-map",
@@ -1620,6 +1724,10 @@ class WorkflowPipeline:
             "fastdecode",
             "-crf",
             "14",
+            "-r",
+            str(VIDEO_OUTPUT_FPS),
+            "-vsync",
+            "cfr",
             "-g",
             "50",
             "-keyint_min",
@@ -1627,9 +1735,9 @@ class WorkflowPipeline:
             "-bf",
             "0",
             "-maxrate",
-            "18M",
+            "12M",
             "-bufsize",
-            "24M",
+            "18M",
             "-profile:v",
             "high",
             "-level",
@@ -1638,22 +1746,31 @@ class WorkflowPipeline:
             "yuv420p",
             "-c:a",
             "aac",
+            "-ar",
+            "48000",
             "-b:a",
             "192k",
+            "-shortest",
             "-avoid_negative_ts",
             "make_zero",
+            "-video_track_timescale",
+            "90000",
             "-movflags",
             "+faststart",
             str(output_path),
         ]
 
     def _caption_overlay_filter_chain(self, subtitle_path: Path, request: dict[str, Any]) -> str:
-        filters: list[str] = ["setpts=PTS-STARTPTS"]
         target_fps = requested_output_fps(request)
+        output_fps = target_fps or VIDEO_OUTPUT_FPS
+        filters: list[str] = []
         if target_fps is not None:
             filters.append(
                 f"minterpolate=fps={target_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
             )
+        else:
+            filters.append(f"fps={output_fps}:start_time=0")
+        filters.append(f"setpts=N/({output_fps}*TB)")
         filters.append(ffmpeg_subtitles_filter(subtitle_path))
         return ",".join(filters)
 
@@ -1669,6 +1786,7 @@ class WorkflowPipeline:
             raise RuntimeError("ffmpeg is not installed.")
 
         target_fps = requested_output_fps(request)
+        output_fps = target_fps or VIDEO_OUTPUT_FPS
         return ffmpeg + [
             "-y",
             "-fflags",
@@ -1678,7 +1796,7 @@ class WorkflowPipeline:
             "-vf",
             self._caption_overlay_filter_chain(subtitle_path, request),
             "-af",
-            "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
+            "asetpts=PTS-STARTPTS,aresample=async=1000:min_hard_comp=0.100:first_pts=0",
             "-map",
             "0:v:0?",
             "-map",
@@ -1691,7 +1809,10 @@ class WorkflowPipeline:
             "fastdecode",
             "-crf",
             "14",
-            *([] if target_fps is None else ["-r", str(target_fps)]),
+            "-r",
+            str(output_fps),
+            "-vsync",
+            "cfr",
             "-g",
             "50",
             "-keyint_min",
@@ -1699,9 +1820,9 @@ class WorkflowPipeline:
             "-bf",
             "0",
             "-maxrate",
-            "18M",
+            "12M",
             "-bufsize",
-            "24M",
+            "18M",
             "-profile:v",
             "high",
             "-level",
@@ -1710,10 +1831,15 @@ class WorkflowPipeline:
             "yuv420p",
             "-c:a",
             "aac",
+            "-ar",
+            "48000",
             "-b:a",
             "192k",
+            "-shortest",
             "-avoid_negative_ts",
             "make_zero",
+            "-video_track_timescale",
+            "90000",
             "-movflags",
             "+faststart",
             str(output_path),
@@ -1810,10 +1936,11 @@ class WorkflowPipeline:
                 encoding="utf-8",
             )
 
-        if not self._stylize_subtitle_file(subtitle_path, str(request.get("language") or "auto")):
+        styled_path = self._stylize_subtitle_file(subtitle_path, str(request.get("language") or "auto"))
+        if styled_path is None:
             job.log(f"OpenAI transcription for {clip_path.name} was not usable as subtitles.")
             return None
-        return subtitle_path
+        return styled_path
 
     def _write_hook_subtitles(
         self,
@@ -1827,7 +1954,7 @@ class WorkflowPipeline:
         if duration < 2.0:
             return None
 
-        subtitle_path = job_dir / f"{clip_path.stem}_hook.srt"
+        subtitle_path = job_dir / f"{clip_path.stem}_hook.ass"
         first_end = min(duration, 2.8)
         second_start = min(duration - 0.2, first_end + 0.25)
         second_end = min(duration, second_start + 2.8)
@@ -1837,17 +1964,18 @@ class WorkflowPipeline:
         if second_end - second_start >= 1.0:
             cues.append((second_start, second_end, "This part is wild"))
 
-        lines: list[str] = []
-        for index, (start, end, text) in enumerate(cues, start=1):
-            lines.extend(
-                [
-                    str(index),
-                    f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}",
+        styled_cues = [
+            (
+                start,
+                end,
+                add_caption_emphasis(
                     wrap_caption_text(text, max_line_chars=CAPTION_LINE_CHARS, max_lines=CAPTION_MAX_LINES),
-                    "",
-                ]
+                    index,
+                ),
             )
-        subtitle_path.write_text("\n".join(lines), encoding="utf-8")
+            for index, (start, end, text) in enumerate(cues, start=1)
+        ]
+        write_ass_subtitles(subtitle_path, styled_cues)
         job.log(f"No usable speech subtitles for {clip_path.name}; adding a short hook overlay.")
         return subtitle_path
 
@@ -2304,7 +2432,7 @@ class WorkflowPipeline:
         if not grouped_entries:
             return 0
 
-        lines = []
+        cues: list[tuple[float, float, str]] = []
         last_end = 0.0
         for index, entry in enumerate(grouped_entries, start=1):
             start = max(entry.start, last_end + (0.02 if index > 1 else 0.0))
@@ -2313,19 +2441,12 @@ class WorkflowPipeline:
                 end = segment.duration
                 start = min(start, max(0.0, end - 0.28))
             display_text = decorate_subtitle_text(entry.text, index, language_hint)
-            lines.extend(
-                [
-                    str(index),
-                    f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}",
-                    display_text,
-                    "",
-                ]
-            )
+            cues.append((start, end, display_text))
             last_end = end
-        target.write_text("\n".join(lines), encoding="utf-8")
+        write_ass_subtitles(target, cues)
         return len(grouped_entries)
 
-    def _stylize_subtitle_file(self, subtitle_path: Path, language_hint: str) -> bool:
+    def _stylize_subtitle_file(self, subtitle_path: Path, language_hint: str) -> Path | None:
         entries = [
             entry
             for entry in self._load_subtitles(subtitle_path)
@@ -2336,13 +2457,14 @@ class WorkflowPipeline:
                 subtitle_path.unlink()
             except Exception:
                 subtitle_path.write_text("", encoding="utf-8")
-            return False
+            return None
 
         effective_hint = language_hint
         if effective_hint == "auto" and any(contains_cyrillic(entry.text) for entry in entries):
             effective_hint = "ru"
 
-        lines = []
+        ass_path = subtitle_path.with_suffix(".ass")
+        cues: list[tuple[float, float, str]] = []
         last_end = 0.0
         cue_index = 1
         for entry in entries:
@@ -2361,24 +2483,21 @@ class WorkflowPipeline:
                 start, end = retime_subtitle_window(raw_start, raw_end)
                 start = max(start, last_end + (0.02 if cue_index > 1 else 0.0))
                 end = max(start + 0.28, end)
-                lines.extend(
-                    [
-                        str(cue_index),
-                        f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}",
-                        decorate_subtitle_text(chunk, cue_index, effective_hint),
-                        "",
-                    ]
-                )
+                cues.append((start, end, decorate_subtitle_text(chunk, cue_index, effective_hint)))
                 cue_index += 1
                 last_end = end
-        if not lines:
+        if not cues:
             try:
                 subtitle_path.unlink()
             except Exception:
                 subtitle_path.write_text("", encoding="utf-8")
-            return False
-        subtitle_path.write_text("\n".join(lines), encoding="utf-8")
-        return True
+            return None
+        write_ass_subtitles(ass_path, cues)
+        try:
+            subtitle_path.unlink()
+        except Exception:
+            pass
+        return ass_path
 
     def _pick_subtitle_path(
         self,
