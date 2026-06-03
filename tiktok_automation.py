@@ -261,9 +261,11 @@ class PostQueueManager:
                 count += 1
         return count
 
-    def next_pending(self) -> dict[str, Any] | None:
+    def next_pending(self, source_id: str | None = None) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc)
         for item in self.list_items():
+            if source_id is not None and item.get("source_id") != source_id:
+                continue
             next_attempt_at = iso_to_datetime(str(item.get("next_attempt_at") or ""))
             if item.get("status") == "pending" and (next_attempt_at is None or next_attempt_at <= now):
                 return item
@@ -746,10 +748,14 @@ class AutomationController:
                 if next_run_at and next_run_at > datetime.now(timezone.utc):
                     return
 
-            next_item = self.post_queue.next_pending()
+            sequence_source = self._current_sequence_source()
+            sequence_source_id = str(sequence_source.get("id") or "") if sequence_source else None
+            next_item = self.post_queue.next_pending(sequence_source_id)
             if next_item is None:
                 self._generate_from_next_source()
-                next_item = self.post_queue.next_pending()
+                sequence_source = self._current_sequence_source()
+                sequence_source_id = str(sequence_source.get("id") or "") if sequence_source else None
+                next_item = self.post_queue.next_pending(sequence_source_id)
 
             if next_item is not None:
                 remote_pending_count = self.post_queue.remote_pending_count()
@@ -838,6 +844,33 @@ class AutomationController:
                 self.append_log(message)
                 self.notify(message)
 
+    def _ordered_sources(self) -> list[dict[str, Any]]:
+        return sorted(
+            self.sources.list_sources(),
+            key=lambda item: (
+                str(item.get("added_at") or ""),
+                str(item.get("id") or ""),
+            ),
+        )
+
+    def _source_is_finished(self, source_entry: dict[str, Any]) -> bool:
+        source_id = str(source_entry.get("id") or "")
+        planned = int(source_entry.get("planned_clips") or 0)
+        posted = int(source_entry.get("posted_clips") or 0)
+        active_left = any(
+            item.get("status") in UPLOAD_ACTIVE_STATES
+            for item in self.post_queue.items_for_source(source_id)
+        )
+        return posted >= planned and not active_left
+
+    def _current_sequence_source(self) -> dict[str, Any] | None:
+        for source_entry in self._ordered_sources():
+            if self._source_is_finished(source_entry):
+                self._maybe_finalize_source(str(source_entry.get("id") or ""))
+                continue
+            return source_entry
+        return None
+
     def _generate_from_next_source(self) -> None:
         source_entry = self._pick_source_for_generation()
         if source_entry is None:
@@ -886,13 +919,21 @@ class AutomationController:
         self.on_workflow_completed(request, result.output_dir)
 
     def _pick_source_for_generation(self) -> dict[str, Any] | None:
-        for source_entry in self.sources.list_sources():
-            source_id = str(source_entry.get("id") or "")
-            planned = int(source_entry.get("planned_clips") or 0)
-            posted = int(source_entry.get("posted_clips") or 0)
-            pending = self.post_queue.allocated_count_for_source(source_id)
-            if planned - posted - pending > 0:
-                return source_entry
+        source_entry = self._current_sequence_source()
+        if source_entry is None:
+            return None
+
+        source_id = str(source_entry.get("id") or "")
+        planned = int(source_entry.get("planned_clips") or 0)
+        posted = int(source_entry.get("posted_clips") or 0)
+        pending = self.post_queue.allocated_count_for_source(source_id)
+        if planned - posted - pending > 0:
+            return source_entry
+
+        self.append_log(
+            f"Waiting for {source_entry.get('title') or source_entry.get('source_url')} to finish "
+            "before starting the next source."
+        )
         return None
 
     def _upload_queue_item(self, item: dict[str, Any]) -> None:
