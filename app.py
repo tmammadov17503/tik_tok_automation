@@ -31,11 +31,11 @@ OUTPUT_ROOT = ROOT / "output"
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 PKCE_UNRESERVED = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
 DEFAULT_TIKTOK_HASHTAGS = [
-    "#fур",
-    "#рекомендации",
+    "#fyp",
+    "#\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438",
     "#relatable",
     "#recommendations",
-    "#реки",
+    "#\u0440\u0435\u043a\u0438",
 ]
 
 

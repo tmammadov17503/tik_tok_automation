@@ -21,6 +21,14 @@ REMOTE_TIKTOK_PENDING_STATES = {"uploading", "processing", "sent_to_inbox"}
 POST_QUEUE_KEEP_STATES = {"pending", "uploading", "processing", "sent_to_inbox", "posted"}
 DEFAULT_TIKTOK_MAX_PENDING_SHARES = 5
 DEFAULT_UPLOAD_MAX_ATTEMPTS = 4
+CANONICAL_TIKTOK_HASHTAGS = [
+    "#fyp",
+    "#\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438",
+    "#relatable",
+    "#recommendations",
+    "#\u0440\u0435\u043a\u0438",
+]
+CAPTION_EMOJI = "\U0001F609"
 RETRYABLE_ERROR_HINTS = (
     "network error",
     "timed out",
@@ -38,6 +46,38 @@ RETRYABLE_ERROR_HINTS = (
     "eof occurred",
     "connection reset",
 )
+
+
+def repair_mojibake(text: str) -> str:
+    try:
+        fixed = text.encode("latin1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+    return fixed if fixed.count("\ufffd") <= text.count("\ufffd") else text
+
+
+def normalize_tiktok_hashtag(tag: str) -> str:
+    clean = repair_mojibake(str(tag or "").strip())
+    if not clean:
+        return ""
+    if not clean.startswith("#"):
+        clean = f"#{clean}"
+    if clean.lower() in {"#fyp", "#f\u0443\u0440"}:
+        return "#fyp"
+    return clean
+
+
+def normalize_tiktok_hashtags(hashtags: list[str] | tuple[str, ...] | None) -> list[str]:
+    source = list(hashtags or CANONICAL_TIKTOK_HASHTAGS)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_tag in source:
+        tag = normalize_tiktok_hashtag(str(raw_tag))
+        key = tag.casefold()
+        if tag and key not in seen:
+            normalized.append(tag)
+            seen.add(key)
+    return normalized or list(CANONICAL_TIKTOK_HASHTAGS)
 NON_RETRYABLE_ERROR_HINTS = (
     "scope_not_authorized",
     "access_token_invalid",
@@ -184,7 +224,7 @@ class PostQueueManager:
         self.path = self.secrets_root / "post_queue.json"
         self.asset_root = root / "queued_clips"
         self.asset_root.mkdir(parents=True, exist_ok=True)
-        self.default_hashtags = list(default_hashtags)
+        self.default_hashtags = normalize_tiktok_hashtags(default_hashtags)
         self._lock = threading.Lock()
 
     def list_items(self) -> list[dict[str, Any]]:
@@ -326,7 +366,7 @@ class PostQueueManager:
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _normalize_item(self, item: dict[str, Any]) -> dict[str, Any]:
-        hashtags = item.get("hashtags") or self.default_hashtags
+        hashtags = normalize_tiktok_hashtags(item.get("hashtags") or self.default_hashtags)
         return {
             "id": str(item.get("id") or uuid.uuid4().hex[:12]),
             "source_id": str(item.get("source_id") or ""),
@@ -343,7 +383,7 @@ class PostQueueManager:
             "error": str(item.get("error") or ""),
             "attempts": max(0, safe_int(item.get("attempts"), 0)),
             "next_attempt_at": str(item.get("next_attempt_at") or ""),
-            "hashtags": [str(tag) for tag in hashtags if str(tag).strip()],
+            "hashtags": hashtags,
             "created_at": str(item.get("created_at") or utc_now()),
             "updated_at": str(item.get("updated_at") or item.get("created_at") or utc_now()),
             "posted_at": str(item.get("posted_at") or ""),
@@ -493,12 +533,16 @@ class AutomationController:
             return
 
     def _caption_hint_for_item(self, item: dict[str, Any]) -> str:
-        hashtags = [
-            str(tag).strip()
-            for tag in (item.get("hashtags") or self.post_queue.default_hashtags)
-            if str(tag).strip()
-        ]
-        return f"{' '.join(hashtags)} 😂".strip()
+        hashtags = normalize_tiktok_hashtags(item.get("hashtags") or self.post_queue.default_hashtags)
+        return f"{' '.join(hashtags)} {CAPTION_EMOJI}".strip()
+
+    def _caption_paste_message(self, item: dict[str, Any]) -> str:
+        caption = self._caption_hint_for_item(item)
+        return (
+            "Caption to paste in TikTok:\n"
+            f"{caption}\n"
+            "TikTok inbox uploads do not prefill captions, so paste this before publishing."
+        )
 
     def _source_cache_dir(self, source_id: str) -> Path:
         safe_id = "".join(char for char in source_id if char.isalnum() or char in {"-", "_"}) or "source"
@@ -824,7 +868,7 @@ class AutomationController:
                     self.notify(
                         f"Video sent to TikTok inbox: {item.get('clip_label') or 'generated clip'}. "
                         f"{self.source_progress_line(str(item.get('source_id') or ''))}\n"
-                        f"Caption: {self._caption_hint_for_item(item)}"
+                        f"{self._caption_paste_message(item)}"
                     )
             elif remote_status in {"PROCESSING_UPLOAD", "PROCESSING_DOWNLOAD"}:
                 self.post_queue.update_item(
@@ -1006,7 +1050,7 @@ class AutomationController:
             self.notify(
                 f"Video sent to TikTok inbox: {item.get('clip_label') or 'generated clip'}. "
                 f"{self.source_progress_line(str(item.get('source_id') or ''))}\n"
-                f"Caption: {self._caption_hint_for_item(item)}"
+                f"{self._caption_paste_message(item)}"
             )
 
     def _mark_item_posted(self, item: dict[str, Any], remote_status: str, *, notify: bool = True) -> None:
