@@ -18,14 +18,16 @@ DURATION_PATTERN = re.compile(r"Duration:\s*(\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)")
 VIDEO_STREAM_PATTERN = re.compile(r"Video:.*?(\d{2,5})x(\d{2,5})")
 MEAN_VOLUME_PATTERN = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
 MAX_VOLUME_PATTERN = re.compile(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
-CAPTION_LINE_CHARS = 9
-CAPTION_MAX_LINES = 3
-CAPTION_CHUNK_CHARS = 25
+CAPTION_LINE_CHARS = 16
+CAPTION_MAX_LINES = 2
+CAPTION_CHUNK_CHARS = 34
 RENDER_SEEK_PREROLL_SECONDS = 5.0
 VIDEO_OUTPUT_FPS = 25
-ASS_WHITE = r"{\1c&H00FFFFFF&}"
-ASS_YELLOW = r"{\1c&H0000FFFF&}"
-ASS_RED = r"{\1c&H00303BFF&}"
+SUBTITLE_EMOJIS_ENABLED = False
+ASS_PRIMARY = r"{\1c&H0000E5FF&}"
+ASS_WHITE = ASS_PRIMARY
+ASS_YELLOW = ASS_PRIMARY
+ASS_RED = ASS_PRIMARY
 ASS_POP = r"{\fad(70,90)}"
 NON_SPEECH_PATTERN = re.compile(
     r"(?iu)(?:\[(?:музыка|music|аплодисменты|applause|смех|laughter|шум|noise|вздохи?|sighs?|кашель|coughing)\]"
@@ -245,9 +247,9 @@ def ffmpeg_subtitles_filter(path: Path) -> str:
     if path.suffix.lower() == ".ass":
         return f"subtitles='{escaped}'"
     style = (
-        "Fontname=Arial Black,Fontsize=10.4,Bold=1,Outline=1.9,Shadow=0.65,"
-        "Alignment=2,MarginL=220,MarginR=220,MarginV=76,BorderStyle=1,Spacing=0.04,WrapStyle=2,"
-        "PrimaryColour=&H00FFFFFF&,OutlineColour=&H00101010&,BackColour=&H00000000&"
+        "Fontname=DejaVu Sans Condensed,Fontsize=13.0,Bold=1,Italic=1,Outline=2.4,Shadow=0.85,"
+        "Alignment=2,MarginL=120,MarginR=120,MarginV=78,BorderStyle=1,Spacing=0.0,WrapStyle=2,"
+        "PrimaryColour=&H0000E5FF&,OutlineColour=&H00101010&,BackColour=&H00000000&"
     )
     return f"subtitles='{escaped}':force_style='{style}'"
 
@@ -522,8 +524,8 @@ def write_ass_subtitles(target: Path, cues: list[tuple[float, float, str]]) -> N
             "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding"
         ),
         (
-            "Style: Default,Arial Black,78,&H00FFFFFF,&H00FFFFFF,&H00101010,&H00000000,"
-            "-1,0,0,0,100,100,0.04,0,1,7,2.3,2,220,220,480,1"
+            "Style: Default,DejaVu Sans Condensed,84,&H0000E5FF,&H0000E5FF,&H00101010,&H00000000,"
+            "-1,-1,0,0,103,100,0,0,1,8,2.8,2,100,100,500,1"
         ),
         "",
         "[Events]",
@@ -676,6 +678,9 @@ def decorate_subtitle_text(text: str, line_index: int, language_hint: str) -> st
             emoji = " \U0001F525"
     elif line_index % 5 == 0:
         emoji = " \U0001F602"
+
+    if not SUBTITLE_EMOJIS_ENABLED:
+        emoji = ""
 
     clean = add_caption_emphasis(clean, line_index)
     if line_index % 4 == 0 or emoji:
