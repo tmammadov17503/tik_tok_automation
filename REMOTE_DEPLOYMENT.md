@@ -90,6 +90,42 @@ TikTok limits pending inbox shares, so the worker now pauses uploads when the re
 
 Source subtitles are used first because they are free and already timestamped. If a source has no subtitles and `OPENAI_API_KEY` is set, the worker extracts audio from each rendered clip and uses the OpenAI transcription API to create captions. Local Whisper remains optional for powerful local machines, but it is not installed by default on small servers.
 
+## Optional TikTok MongoDB Analytics
+
+MongoDB analytics are intentionally separate from the trading bot project. The TikTok sync reads only this app's local JSON state and writes to TikTok-only collections:
+
+- `tiktok_accounts`
+- `tiktok_sources`
+- `tiktok_clips`
+- `tiktok_automation_state`
+- `tiktok_health_snapshots`
+
+Use a separate database name such as:
+
+```text
+tiktok_video_analytics
+```
+
+Install it on the TikTok server from your local machine:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\deploy\install-tiktok-mongodb-analytics.ps1
+```
+
+The installer asks for the MongoDB Atlas URI with hidden input, writes it only to:
+
+```text
+/home/ubuntu/tik_tok_automation/.secrets/mongo.env
+```
+
+It then creates a separate timer:
+
+```text
+tik-tok-mongo-sync.timer
+```
+
+This does not modify trading bot services, trading bot files, or trading bot MongoDB collections.
+
 ## Non-Docker Deploy
 
 Install system packages:
