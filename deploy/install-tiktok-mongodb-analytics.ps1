@@ -94,7 +94,7 @@ print(max(1, int(payload.get('interval_minutes') or 10)))
 PY
 )
 
-cat >/etc/systemd/system/tik-tok-mongo-sync.service <<'UNIT'
+cat >/tmp/tik-tok-mongo-sync.service <<'UNIT'
 [Unit]
 Description=TikTok Automation MongoDB Analytics Sync
 After=network-online.target tik-tok-automation.service
@@ -109,7 +109,9 @@ EnvironmentFile=/home/ubuntu/tik_tok_automation/.secrets/mongo.env
 ExecStart=/home/ubuntu/tik_tok_automation/.venv/bin/python /home/ubuntu/tik_tok_automation/tiktok_mongo_sync.py --counts
 UNIT
 
-cat >/etc/systemd/system/tik-tok-mongo-sync.timer <<UNIT
+sudo install -o root -g root -m 0644 /tmp/tik-tok-mongo-sync.service /etc/systemd/system/tik-tok-mongo-sync.service
+
+cat >/tmp/tik-tok-mongo-sync.timer <<UNIT
 [Unit]
 Description=Run TikTok MongoDB Analytics Sync
 
@@ -123,11 +125,13 @@ Unit=tik-tok-mongo-sync.service
 WantedBy=timers.target
 UNIT
 
-systemctl daemon-reload
-systemctl enable --now tik-tok-mongo-sync.timer
+sudo install -o root -g root -m 0644 /tmp/tik-tok-mongo-sync.timer /etc/systemd/system/tik-tok-mongo-sync.timer
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now tik-tok-mongo-sync.timer
 
 echo 'Running first TikTok MongoDB analytics sync...'
-systemctl start tik-tok-mongo-sync.service
+sudo systemctl start tik-tok-mongo-sync.service
 sleep 5
 
 echo '---TIKTOK MONGO TIMER---'
