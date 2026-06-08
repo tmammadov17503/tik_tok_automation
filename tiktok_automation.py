@@ -21,6 +21,7 @@ REMOTE_TIKTOK_PENDING_STATES = {"uploading", "processing", "sent_to_inbox"}
 POST_QUEUE_KEEP_STATES = {"pending", "uploading", "processing", "sent_to_inbox", "posted"}
 DEFAULT_TIKTOK_MAX_PENDING_SHARES = 5
 DEFAULT_UPLOAD_MAX_ATTEMPTS = 4
+DEFAULT_AUTOMATION_INTERVAL_HOURS = 12
 CANONICAL_TIKTOK_HASHTAGS = [
     "#fyp",
     "#\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438",
@@ -78,6 +79,16 @@ def normalize_tiktok_hashtags(hashtags: list[str] | tuple[str, ...] | None) -> l
             normalized.append(tag)
             seen.add(key)
     return normalized or list(CANONICAL_TIKTOK_HASHTAGS)
+
+
+def compact_number(value: int | float) -> str:
+    number = float(value)
+    for suffix, divisor in (("M", 1_000_000), ("K", 1_000)):
+        if abs(number) >= divisor:
+            compact = number / divisor
+            text = f"{compact:.1f}".rstrip("0").rstrip(".")
+            return f"{text}{suffix}"
+    return str(int(number))
 NON_RETRYABLE_ERROR_HINTS = (
     "scope_not_authorized",
     "access_token_invalid",
@@ -392,6 +403,163 @@ class PostQueueManager:
         }
 
 
+class PerformanceMetricsStore:
+    def __init__(self, root: Path, post_queue: PostQueueManager) -> None:
+        self.root = root
+        self.post_queue = post_queue
+        self.secrets_root = root / ".secrets"
+        self.secrets_root.mkdir(parents=True, exist_ok=True)
+        self.path = self.secrets_root / "performance_metrics.json"
+        self._lock = threading.Lock()
+
+    def list_metrics(self) -> list[dict[str, Any]]:
+        data = self._read()
+        items = [self._normalize_metric(dict(item)) for item in data.get("items") or []]
+        return sorted(items, key=lambda item: item.get("recorded_at") or "", reverse=False)
+
+    def recent_metrics(self, limit: int = 10) -> list[dict[str, Any]]:
+        return list(reversed(self.list_metrics()))[: max(1, limit)]
+
+    def record_metrics(
+        self,
+        *,
+        clip_ref: str,
+        views: int,
+        likes: int,
+        comments: int = 0,
+        saves: int = 0,
+        shares: int = 0,
+        notes: str = "",
+    ) -> dict[str, Any]:
+        clip = self.resolve_clip(clip_ref)
+        if clip is None:
+            raise ValueError(f"Could not find clip '{clip_ref}'. Use /clips to see recent clip labels.")
+
+        metric = self._normalize_metric(
+            {
+                "id": uuid.uuid4().hex[:12],
+                "clip_id": clip.get("id") or "",
+                "clip_label": clip.get("clip_label") or "",
+                "source_id": clip.get("source_id") or "",
+                "source_url": clip.get("source_url") or "",
+                "source_title": clip.get("source_title") or "",
+                "views": max(0, int(views)),
+                "likes": max(0, int(likes)),
+                "comments": max(0, int(comments)),
+                "saves": max(0, int(saves)),
+                "shares": max(0, int(shares)),
+                "notes": notes.strip(),
+                "recorded_at": utc_now(),
+            }
+        )
+        with self._lock:
+            data = self._read()
+            items = data.setdefault("items", [])
+            items.append(metric)
+            data["items"] = items[-1000:]
+            self._write(data)
+        return metric
+
+    def resolve_clip(self, clip_ref: str) -> dict[str, Any] | None:
+        ref = str(clip_ref or "").strip().lower()
+        candidates = [
+            item
+            for item in self.post_queue.list_items()
+            if item.get("status") in {"posted", "sent_to_inbox"}
+        ]
+        candidates = sorted(
+            candidates,
+            key=lambda item: item.get("posted_at") or item.get("inbox_delivered_at") or item.get("updated_at") or "",
+            reverse=True,
+        )
+        if not ref or ref in {"latest", "last", "recent"}:
+            return candidates[0] if candidates else None
+
+        normalized_ref = ref.replace("-", "_")
+        for item in candidates:
+            fields = [
+                str(item.get("id") or ""),
+                str(item.get("clip_label") or ""),
+                str(item.get("original_name") or ""),
+            ]
+            for field in fields:
+                normalized_field = field.lower().replace("-", "_")
+                if normalized_ref == normalized_field or normalized_ref in normalized_field:
+                    return item
+        return None
+
+    def recent_clip_lines(self, limit: int = 8) -> list[str]:
+        candidates = [
+            item
+            for item in self.post_queue.list_items()
+            if item.get("status") in {"posted", "sent_to_inbox"}
+        ]
+        candidates = sorted(
+            candidates,
+            key=lambda item: item.get("posted_at") or item.get("inbox_delivered_at") or item.get("updated_at") or "",
+            reverse=True,
+        )
+        lines: list[str] = []
+        for item in candidates[: max(1, limit)]:
+            when = item.get("posted_at") or item.get("inbox_delivered_at") or item.get("updated_at") or ""
+            status = item.get("status") or ""
+            label = item.get("clip_label") or item.get("id") or "clip"
+            lines.append(f"- {label} ({status}, {when})")
+        return lines
+
+    def summary_line(self, limit: int = 10) -> str:
+        metrics = self.recent_metrics(limit)
+        if not metrics:
+            return "No TikTok performance metrics recorded yet."
+        total_views = sum(int(item.get("views") or 0) for item in metrics)
+        total_likes = sum(int(item.get("likes") or 0) for item in metrics)
+        total_comments = sum(int(item.get("comments") or 0) for item in metrics)
+        total_saves = sum(int(item.get("saves") or 0) for item in metrics)
+        total_shares = sum(int(item.get("shares") or 0) for item in metrics)
+        like_rate = (total_likes / total_views * 100) if total_views else 0.0
+        engagement = ((total_likes + total_comments + total_saves + total_shares) / total_views * 100) if total_views else 0.0
+        return (
+            f"Last {len(metrics)} metrics: {compact_number(total_views)} views, "
+            f"{compact_number(total_likes)} likes, like rate {like_rate:.1f}%, "
+            f"engagement {engagement:.1f}%."
+        )
+
+    def _normalize_metric(self, metric: dict[str, Any]) -> dict[str, Any]:
+        views = max(0, safe_int(metric.get("views"), 0))
+        likes = max(0, safe_int(metric.get("likes"), 0))
+        comments = max(0, safe_int(metric.get("comments"), 0))
+        saves = max(0, safe_int(metric.get("saves"), 0))
+        shares = max(0, safe_int(metric.get("shares"), 0))
+        like_rate = (likes / views) if views else 0.0
+        engagement_rate = ((likes + comments + saves + shares) / views) if views else 0.0
+        return {
+            "id": str(metric.get("id") or uuid.uuid4().hex[:12]),
+            "clip_id": str(metric.get("clip_id") or ""),
+            "clip_label": str(metric.get("clip_label") or ""),
+            "source_id": str(metric.get("source_id") or ""),
+            "source_url": str(metric.get("source_url") or ""),
+            "source_title": str(metric.get("source_title") or ""),
+            "views": views,
+            "likes": likes,
+            "comments": comments,
+            "saves": saves,
+            "shares": shares,
+            "like_rate": like_rate,
+            "engagement_rate": engagement_rate,
+            "notes": str(metric.get("notes") or ""),
+            "recorded_at": str(metric.get("recorded_at") or utc_now()),
+        }
+
+    def _read(self) -> dict[str, Any]:
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"items": []}
+
+    def _write(self, payload: dict[str, Any]) -> None:
+        self.path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 class TikTokPublisher:
     def __init__(self, auth_manager: Any) -> None:
         self.auth = auth_manager
@@ -494,6 +662,7 @@ class AutomationController:
         self.auth = auth_manager
         self.sources = source_manager
         self.post_queue = PostQueueManager(root, default_hashtags)
+        self.metrics = PerformanceMetricsStore(root, self.post_queue)
         self.publisher = TikTokPublisher(auth_manager)
         self.state_path = root / ".secrets" / "automation_state.json"
         self.source_cache_root = root / ".secrets" / "source_cache"
@@ -574,7 +743,7 @@ class AutomationController:
         remote_pending_count = self.post_queue.remote_pending_count()
         return {
             "enabled": bool(state.get("enabled")),
-            "interval_hours": int(state.get("interval_hours") or 6),
+            "interval_hours": int(state.get("interval_hours") or DEFAULT_AUTOMATION_INTERVAL_HOURS),
             "next_run_at": state.get("next_run_at"),
             "last_run_at": state.get("last_run_at"),
             "last_error": state.get("last_error") or "",
@@ -588,6 +757,7 @@ class AutomationController:
                 "posted": sum(1 for item in queue_items if item.get("status") == "posted"),
                 "failed": sum(1 for item in queue_items if item.get("status") == "failed"),
             },
+            "performance_summary": self.metrics.summary_line(),
             "running": self._running.locked(),
             "tiktok_pending_cap": self.max_pending_shares,
             "tiktok_remote_pending": remote_pending_count,
@@ -647,11 +817,52 @@ class AutomationController:
             "message": f"Marked {label} as posted. {self.source_progress_line(source_id)}",
         }
 
+    def record_performance_metrics(
+        self,
+        *,
+        clip_ref: str,
+        views: int,
+        likes: int,
+        comments: int = 0,
+        saves: int = 0,
+        shares: int = 0,
+        notes: str = "",
+    ) -> dict[str, Any]:
+        return self.metrics.record_metrics(
+            clip_ref=clip_ref,
+            views=views,
+            likes=likes,
+            comments=comments,
+            saves=saves,
+            shares=shares,
+            notes=notes,
+        )
+
+    def recent_clip_lines(self, limit: int = 8) -> list[str]:
+        return self.metrics.recent_clip_lines(limit)
+
+    def performance_summary_text(self, limit: int = 10) -> str:
+        lines = [self.metrics.summary_line(limit)]
+        for metric in self.metrics.recent_metrics(limit):
+            lines.append(
+                f"- {metric.get('clip_label') or metric.get('clip_id')}: "
+                f"{compact_number(metric.get('views') or 0)} views, "
+                f"{compact_number(metric.get('likes') or 0)} likes, "
+                f"{float(metric.get('like_rate') or 0.0) * 100:.1f}% like rate"
+            )
+        return "\n".join(lines)
+
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             state = self._read_state()
             enabled = bool(payload.get("enabled"))
-            interval_hours = max(1, min(int(payload.get("interval_hours") or state.get("interval_hours") or 6), 24))
+            interval_hours = max(
+                1,
+                min(
+                    int(payload.get("interval_hours") or state.get("interval_hours") or DEFAULT_AUTOMATION_INTERVAL_HOURS),
+                    24,
+                ),
+            )
             state["enabled"] = enabled
             state["interval_hours"] = interval_hours
             if enabled:
@@ -818,7 +1029,7 @@ class AutomationController:
             with self._lock:
                 state = self._read_state()
                 state["last_run_at"] = utc_now()
-                interval_hours = int(state.get("interval_hours") or 6)
+                interval_hours = int(state.get("interval_hours") or DEFAULT_AUTOMATION_INTERVAL_HOURS)
                 state["next_run_at"] = (
                     datetime.now(timezone.utc) + timedelta(hours=interval_hours)
                 ).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -831,7 +1042,7 @@ class AutomationController:
             with self._lock:
                 state = self._read_state()
                 state["last_run_at"] = utc_now()
-                interval_hours = int(state.get("interval_hours") or 6)
+                interval_hours = int(state.get("interval_hours") or DEFAULT_AUTOMATION_INTERVAL_HOURS)
                 state["next_run_at"] = (
                     datetime.now(timezone.utc) + timedelta(hours=interval_hours)
                 ).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -1102,7 +1313,7 @@ class AutomationController:
         except Exception:
             return {
                 "enabled": False,
-                "interval_hours": 6,
+                "interval_hours": DEFAULT_AUTOMATION_INTERVAL_HOURS,
                 "next_run_at": None,
                 "last_run_at": None,
                 "last_error": "",

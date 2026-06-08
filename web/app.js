@@ -354,7 +354,10 @@ function renderAutomationQueue(items) {
 function renderAutomationStatus(data) {
   const lines = [];
   lines.push(`<p><strong>${data.enabled ? "Automation is enabled." : "Automation is paused."}</strong></p>`);
-  lines.push(`<p class="mini-line">Runs every ${escapeHtml(String(data.interval_hours || 6))} hour(s).</p>`);
+  lines.push(`<p class="mini-line">Runs every ${escapeHtml(String(data.interval_hours || 12))} hour(s).</p>`);
+  if (data.performance_summary) {
+    lines.push(`<p class="mini-line">${escapeHtml(String(data.performance_summary))}</p>`);
+  }
   lines.push(`<p class="mini-line">Running now: ${data.running ? "yes" : "no"}.</p>`);
   if (data.draft_only) {
     lines.push("<p class=\"mini-line\">Current TikTok mode: upload to draft/inbox. Fully public hands-off posting needs video.publish approval later.</p>");
@@ -385,7 +388,7 @@ function renderAutomationStatus(data) {
   }
 
   automationSummary.innerHTML = lines.join("");
-  automationForm.elements.interval_hours.value = String(data.interval_hours || 6);
+  automationForm.elements.interval_hours.value = String(data.interval_hours || 12);
   automationForm.elements.enabled.checked = Boolean(data.enabled);
   renderAutomationQueue(data.queue_items || []);
 }
@@ -530,7 +533,7 @@ async function saveAutomationSettings(event) {
   saveButton.textContent = "Saving...";
 
   const payload = {
-    interval_hours: Number(automationForm.elements.interval_hours.value || 6),
+    interval_hours: Number(automationForm.elements.interval_hours.value || 12),
     enabled: automationForm.elements.enabled.checked,
   };
   const response = await fetch("/api/automation/config", {

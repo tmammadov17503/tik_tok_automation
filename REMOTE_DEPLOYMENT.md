@@ -97,6 +97,7 @@ MongoDB analytics are intentionally separate from the trading bot project. The T
 - `tiktok_accounts`
 - `tiktok_sources`
 - `tiktok_clips`
+- `tiktok_clip_metrics`
 - `tiktok_automation_state`
 - `tiktok_health_snapshots`
 
@@ -125,6 +126,26 @@ tik-tok-mongo-sync.timer
 ```
 
 This does not modify trading bot services, trading bot files, or trading bot MongoDB collections.
+
+After a TikTok post is public, send metrics to the Telegram bot:
+
+```text
+/metrics clip_08 1200 94 12 5 3
+```
+
+The numbers are:
+
+```text
+views likes comments saves shares
+```
+
+If you omit the clip label, the bot records the metrics against the latest posted clip:
+
+```text
+/metrics 1200 94
+```
+
+Use `/clips` to see recent labels and `/performance` to see the recent summary.
 
 ## Non-Docker Deploy
 

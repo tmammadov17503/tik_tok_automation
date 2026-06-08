@@ -30,6 +30,7 @@ POST_QUEUE_PATH = SECRETS_ROOT / "post_queue.json"
 SOURCE_QUEUE_PATH = SECRETS_ROOT / "source_queue.json"
 AUTOMATION_STATE_PATH = SECRETS_ROOT / "automation_state.json"
 TIKTOK_TOKENS_PATH = SECRETS_ROOT / "tiktok_tokens.json"
+PERFORMANCE_METRICS_PATH = SECRETS_ROOT / "performance_metrics.json"
 MONGO_ENV_PATH = SECRETS_ROOT / "mongo.env"
 
 DATE_FIELDS = {
@@ -40,6 +41,7 @@ DATE_FIELDS = {
     "last_run_at",
     "next_run_at",
     "posted_at",
+    "recorded_at",
     "updated_at",
 }
 
@@ -162,6 +164,9 @@ class TikTokMongoSync:
         self.db.tiktok_clips.create_index([("account_id", ASCENDING), ("clip_id", ASCENDING)], unique=True)
         self.db.tiktok_clips.create_index([("account_id", ASCENDING), ("source_id", ASCENDING), ("status", ASCENDING)])
         self.db.tiktok_clips.create_index([("posted_at_dt", ASCENDING)])
+        self.db.tiktok_clip_metrics.create_index([("account_id", ASCENDING), ("metric_id", ASCENDING)], unique=True)
+        self.db.tiktok_clip_metrics.create_index([("account_id", ASCENDING), ("clip_id", ASCENDING), ("recorded_at_dt", ASCENDING)])
+        self.db.tiktok_clip_metrics.create_index([("recorded_at_dt", ASCENDING)])
         self.db.tiktok_automation_state.create_index([("account_id", ASCENDING)], unique=True)
         self.ensure_ttl_index(
             "tiktok_health_snapshots",
@@ -200,9 +205,11 @@ class TikTokMongoSync:
         source_queue = read_json(SOURCE_QUEUE_PATH, {"sources": []})
         automation_state = read_json(AUTOMATION_STATE_PATH, {})
         tokens = read_json(TIKTOK_TOKENS_PATH, {})
+        metrics_state = read_json(PERFORMANCE_METRICS_PATH, {"items": []})
 
         items = [dict(item) for item in post_queue.get("items") or []]
         sources = [dict(source) for source in source_queue.get("sources") or []]
+        metrics = [dict(item) for item in metrics_state.get("items") or []]
         counts = queue_counts(items)
 
         account_doc = {
@@ -267,11 +274,38 @@ class TikTokMongoSync:
             )
             clip_docs.append(doc)
 
+        metric_docs = []
+        for metric in metrics:
+            metric_id = str(metric.get("id") or "")
+            views = max(0, int(metric.get("views") or 0))
+            likes = max(0, int(metric.get("likes") or 0))
+            comments = max(0, int(metric.get("comments") or 0))
+            saves = max(0, int(metric.get("saves") or 0))
+            shares = max(0, int(metric.get("shares") or 0))
+            doc = add_date_fields(
+                {
+                    **metric,
+                    "_id": f"{self.account_id}:{metric_id}",
+                    "account_id": self.account_id,
+                    "metric_id": metric_id,
+                    "views": views,
+                    "likes": likes,
+                    "comments": comments,
+                    "saves": saves,
+                    "shares": shares,
+                    "like_rate": (likes / views) if views else 0.0,
+                    "engagement_rate": ((likes + comments + saves + shares) / views) if views else 0.0,
+                    "last_synced_at": now,
+                }
+            )
+            metric_docs.append(doc)
+
         synced = {
             "tiktok_accounts": self.bulk_replace("tiktok_accounts", [account_doc]),
             "tiktok_automation_state": self.bulk_replace("tiktok_automation_state", [state_doc]),
             "tiktok_sources": self.bulk_replace("tiktok_sources", source_docs),
             "tiktok_clips": self.bulk_replace("tiktok_clips", clip_docs),
+            "tiktok_clip_metrics": self.bulk_replace("tiktok_clip_metrics", metric_docs),
             "tiktok_health_snapshots": self.bulk_replace("tiktok_health_snapshots", [health_doc]),
         }
         return synced

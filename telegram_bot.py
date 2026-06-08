@@ -14,16 +14,21 @@ from urllib.request import Request, urlopen
 
 YOUTUBE_URL_PATTERN = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s<>()]+", re.IGNORECASE)
 TRUE_VALUES = {"1", "true", "yes", "on"}
+BOT_COMMANDS_VERSION = "2026-06-09.metrics-v1"
 BOT_COMMANDS = [
     {"command": "start", "description": "Connect this chat and show help"},
     {"command": "status", "description": "Show automation and inbox counts"},
     {"command": "queue", "description": "Show queued YouTube links and progress"},
+    {"command": "clips", "description": "Show recent clip labels for metrics"},
+    {"command": "metrics", "description": "Record views likes comments saves shares"},
+    {"command": "performance", "description": "Show recent TikTok performance"},
     {"command": "run", "description": "Start one automation run now"},
-    {"command": "pause", "description": "Pause scheduled 6-hour runs"},
-    {"command": "resume", "description": "Resume the 6-hour schedule"},
+    {"command": "pause", "description": "Pause scheduled runs"},
+    {"command": "resume", "description": "Resume the 12-hour schedule"},
     {"command": "posted", "description": "Mark oldest inbox video as posted"},
     {"command": "help", "description": "Show available commands"},
 ]
+DEFAULT_AUTOMATION_INTERVAL_HOURS = 12
 
 
 def utc_now() -> str:
@@ -70,6 +75,7 @@ class TelegramBotService:
             "last_error": str(config.get("last_error") or ""),
             "last_update_at": str(config.get("last_update_at") or ""),
             "commands_installed": bool(config.get("commands_installed")),
+            "commands_version": str(config.get("commands_version") or ""),
         }
 
     def save_config(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -156,7 +162,7 @@ class TelegramBotService:
                 continue
 
             try:
-                if not config.get("commands_installed"):
+                if not config.get("commands_installed") or str(config.get("commands_version") or "") != BOT_COMMANDS_VERSION:
                     self.install_command_menu(token)
                     self._mark_commands_installed()
                 response = self._telegram_request(
@@ -215,6 +221,15 @@ class TelegramBotService:
         if command == "/queue":
             self._send_message(token, chat_id, self._queue_text())
             return
+        if command == "/clips":
+            self._send_message(token, chat_id, self._clips_text())
+            return
+        if command == "/performance":
+            self._send_message(token, chat_id, self.automation.performance_summary_text())
+            return
+        if command == "/metrics":
+            self._send_message(token, chat_id, self._record_metrics_text(text))
+            return
         if command == "/run":
             self.automation.run_now()
             self._send_message(token, chat_id, "Automation run started now.")
@@ -224,8 +239,14 @@ class TelegramBotService:
             self._send_message(token, chat_id, "Automation paused.")
             return
         if command == "/resume":
-            self.automation.update_settings({"enabled": True, "interval_hours": 6, "next_run_at": utc_now()})
-            self._send_message(token, chat_id, "Automation enabled. Next run starts now, then every 6 hours.")
+            self.automation.update_settings(
+                {"enabled": True, "interval_hours": DEFAULT_AUTOMATION_INTERVAL_HOURS, "next_run_at": utc_now()}
+            )
+            self._send_message(
+                token,
+                chat_id,
+                f"Automation enabled. Next run starts now, then every {DEFAULT_AUTOMATION_INTERVAL_HOURS} hours.",
+            )
             self.automation.run_now()
             return
         if command == "/posted":
@@ -241,14 +262,16 @@ class TelegramBotService:
         for url in urls:
             self.sources.add_source({"source_url": url, "planned_clips": 8})
 
-        self.automation.update_settings({"enabled": True, "interval_hours": 6, "next_run_at": utc_now()})
+        self.automation.update_settings(
+            {"enabled": True, "interval_hours": DEFAULT_AUTOMATION_INTERVAL_HOURS, "next_run_at": utc_now()}
+        )
         self.automation.run_now()
         count = len(urls)
         suffix = "" if count == 1 else "s"
         self._send_message(
             token,
             chat_id,
-            f"Queued {count} YouTube link{suffix}. Each link is set to 8 videos. I started the first run now; after that it runs every 6 hours.",
+            f"Queued {count} YouTube link{suffix}. Each link is set to 8 videos. I started the first run now; after that it runs every {DEFAULT_AUTOMATION_INTERVAL_HOURS} hours.",
         )
 
     def _help_text(self) -> str:
@@ -256,9 +279,12 @@ class TelegramBotService:
             "Send a YouTube link and I will queue 8 short videos from it.\n\n"
             "/status - current automation counts\n"
             "/queue - source links and clip progress\n"
+            "/clips - recent clip labels for metrics\n"
+            "/metrics [clip] views likes comments saves shares - record TikTok results\n"
+            "/performance - recent views and like-rate summary\n"
             "/run - start a run now\n"
             "/pause - stop scheduled runs\n"
-            "/resume - enable 6-hour schedule\n"
+            "/resume - enable 12-hour schedule\n"
             "/posted - mark the oldest inbox video as posted"
         )
 
@@ -272,6 +298,7 @@ class TelegramBotService:
             f"Next run: {status.get('next_run_at') or 'not scheduled'}",
             f"Queue: {counts.get('pending', 0)} pending, {counts.get('making', 0)} making/queued, {counts.get('inbox', 0)} in inbox, {counts.get('posted', 0)} posted, {counts.get('failed', 0)} failed",
             f"TikTok inbox API usage: {status.get('tiktok_remote_pending', 0)}/{status.get('tiktok_pending_cap', 0)}",
+            str(status.get("performance_summary") or ""),
         ]
         if status.get("last_error"):
             lines.append(f"Last issue: {status['last_error']}")
@@ -290,6 +317,86 @@ class TelegramBotService:
         if len(sources) > 12:
             lines.append(f"...and {len(sources) - 12} more.")
         return "\n".join(lines)
+
+    def _clips_text(self) -> str:
+        lines = self.automation.recent_clip_lines()
+        if not lines:
+            return "No posted or inbox clips found yet."
+        return "Recent clips for /metrics\n" + "\n".join(lines)
+
+    def _record_metrics_text(self, text: str) -> str:
+        parts = text.split()
+        if len(parts) < 3:
+            return (
+                "Usage:\n"
+                "/metrics views likes [comments] [saves] [shares]\n"
+                "/metrics clip_08 views likes [comments] [saves] [shares]\n"
+                "Example: /metrics clip_08 1200 94 12 5 3"
+            )
+
+        payload = parts[1:]
+        clip_ref = "latest"
+        if payload and not self._looks_like_int(payload[0]):
+            clip_ref = payload.pop(0)
+
+        if len(payload) < 2:
+            return "Please include at least views and likes. Example: /metrics clip_08 1200 94"
+
+        try:
+            views = self._parse_count(payload[0])
+            likes = self._parse_count(payload[1])
+            comments = self._parse_count(payload[2]) if len(payload) > 2 else 0
+            saves = self._parse_count(payload[3]) if len(payload) > 3 else 0
+            shares = self._parse_count(payload[4]) if len(payload) > 4 else 0
+        except ValueError as exc:
+            return str(exc)
+
+        notes = " ".join(payload[5:]).strip() if len(payload) > 5 else ""
+        try:
+            metric = self.automation.record_performance_metrics(
+                clip_ref=clip_ref,
+                views=views,
+                likes=likes,
+                comments=comments,
+                saves=saves,
+                shares=shares,
+                notes=notes,
+            )
+        except Exception as exc:
+            return f"Metrics were not saved: {exc}"
+
+        like_rate = float(metric.get("like_rate") or 0.0) * 100
+        engagement_rate = float(metric.get("engagement_rate") or 0.0) * 100
+        return (
+            f"Saved metrics for {metric.get('clip_label') or metric.get('clip_id')}.\n"
+            f"Views: {metric['views']}, likes: {metric['likes']}, comments: {metric['comments']}, "
+            f"saves: {metric['saves']}, shares: {metric['shares']}.\n"
+            f"Like rate: {like_rate:.1f}%, engagement: {engagement_rate:.1f}%."
+        )
+
+    def _looks_like_int(self, value: str) -> bool:
+        try:
+            self._parse_count(value)
+            return True
+        except ValueError:
+            return False
+
+    def _parse_count(self, value: str) -> int:
+        raw = value.strip().lower().replace(",", "").replace("_", "")
+        multiplier = 1
+        if raw.endswith("k"):
+            multiplier = 1000
+            raw = raw[:-1]
+        elif raw.endswith("m"):
+            multiplier = 1000000
+            raw = raw[:-1]
+        try:
+            number = float(raw)
+        except ValueError as exc:
+            raise ValueError(f"Could not read number: {value}") from exc
+        if number < 0:
+            raise ValueError("Metrics cannot be negative.")
+        return int(round(number * multiplier))
 
     def _send_message(self, token: str, chat_id: str, text: str) -> None:
         chunks = [text[index : index + 3900] for index in range(0, len(text), 3900)] or [text]
@@ -345,6 +452,7 @@ class TelegramBotService:
         with self._lock:
             config = self._read_config()
             config["commands_installed"] = True
+            config["commands_version"] = BOT_COMMANDS_VERSION
             config["last_update_at"] = utc_now()
             self._write_config(config)
 
