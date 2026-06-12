@@ -814,7 +814,10 @@ class AutomationController:
         self._mark_item_posted(item, "MANUAL_POSTED", notify=False)
         return {
             "ok": True,
-            "message": f"Marked {label} as posted. {self.source_progress_line(source_id)}",
+            "message": (
+                f"Marked {label} as posted. {self.source_progress_line(source_id)}\n"
+                f"Later send: /metrics {label} views likes comments saves shares"
+            ),
         }
 
     def record_performance_metrics(
@@ -1287,9 +1290,11 @@ class AutomationController:
 
         self.append_log(f"{item.get('clip_label')} completed on TikTok and was removed from local queued storage.")
         if notify:
+            label = item.get("clip_label") or "latest"
             self.notify(
-                f"Posted confirmed for {item.get('clip_label') or 'generated clip'}. "
-                f"{self.source_progress_line(source_id)}"
+                f"Posted confirmed for {label}. "
+                f"{self.source_progress_line(source_id)}\n"
+                f"Later send: /metrics {label} views likes comments saves shares"
             )
 
     def _maybe_finalize_source(self, source_id: str) -> None:

@@ -314,6 +314,7 @@ class SourceQueueManager:
                 if title:
                     existing["title"] = title
                 existing["updated_at"] = now
+                existing.update(self._normalize_entry(existing))
             else:
                 sources.append(
                     self._normalize_entry(
@@ -340,12 +341,13 @@ class SourceQueueManager:
         with self._lock:
             data = self._read()
             sources = data.setdefault("sources", [])
-            target = next((item for item in sources if item.get("id") == source_id), None)
+            target_index = next((index for index, item in enumerate(sources) if item.get("id") == source_id), None)
+            target = sources[target_index] if target_index is not None else None
             if target is None:
                 raise ValueError("Source entry not found.")
             target["posted_clips"] = int(target.get("posted_clips") or 0) + count
             target["updated_at"] = utc_now()
-            target = self._normalize_entry(target)
+            sources[target_index] = self._normalize_entry(target)
             self._write(data)
 
         return self.list_sources()
