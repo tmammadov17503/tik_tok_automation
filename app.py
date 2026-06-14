@@ -410,7 +410,7 @@ class TikTokAuthManager:
             "client_key": "",
             "client_secret": "",
             "redirect_uri": "http://127.0.0.1:8765/auth/tiktok/callback",
-            "scopes": "user.info.basic,video.upload",
+            "scopes": "user.info.basic,video.upload,video.list",
         }
 
     def _read_json_file(self, path: Path) -> dict[str, Any]:
@@ -847,7 +847,10 @@ class TikTokAuthManager:
     def _normalize_scopes(self, raw: str) -> str:
         scopes = [item.strip() for item in raw.replace(" ", "").split(",") if item.strip()]
         if not scopes:
-            scopes = ["user.info.basic", "video.upload"]
+            scopes = ["user.info.basic", "video.upload", "video.list"]
+        for required_scope in ("user.info.basic", "video.upload", "video.list"):
+            if required_scope not in scopes:
+                scopes.append(required_scope)
         return ",".join(dict.fromkeys(scopes))
 
     def _normalize_token_response(self, response: dict[str, Any]) -> dict[str, Any]:

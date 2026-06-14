@@ -16,6 +16,10 @@ from urllib.request import Request, urlopen
 
 UPLOAD_INIT_URL = "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/"
 STATUS_FETCH_URL = "https://open.tiktokapis.com/v2/post/publish/status/fetch/"
+VIDEO_LIST_URL = (
+    "https://open.tiktokapis.com/v2/video/list/"
+    "?fields=id,create_time,share_url,video_description,duration,like_count,comment_count,share_count,view_count,title"
+)
 UPLOAD_ACTIVE_STATES = {"pending", "uploading", "processing", "sent_to_inbox"}
 REMOTE_TIKTOK_PENDING_STATES = {"uploading", "processing", "sent_to_inbox"}
 POST_QUEUE_KEEP_STATES = {"pending", "uploading", "processing", "sent_to_inbox", "posted"}
@@ -400,6 +404,10 @@ class PostQueueManager:
             "posted_at": str(item.get("posted_at") or ""),
             "inbox_delivered_at": str(item.get("inbox_delivered_at") or ""),
             "asset_deleted_at": str(item.get("asset_deleted_at") or ""),
+            "tiktok_video_id": str(item.get("tiktok_video_id") or ""),
+            "tiktok_share_url": str(item.get("tiktok_share_url") or ""),
+            "tiktok_create_time": safe_int(item.get("tiktok_create_time"), 0),
+            "auto_metrics_at": str(item.get("auto_metrics_at") or ""),
         }
 
 
@@ -418,7 +426,20 @@ class PerformanceMetricsStore:
         return sorted(items, key=lambda item: item.get("recorded_at") or "", reverse=False)
 
     def recent_metrics(self, limit: int = 10) -> list[dict[str, Any]]:
-        return list(reversed(self.list_metrics()))[: max(1, limit)]
+        latest: dict[str, dict[str, Any]] = {}
+        for metric in self.list_metrics():
+            key = (
+                str(metric.get("clip_id") or "")
+                or str(metric.get("tiktok_video_id") or "")
+                or str(metric.get("clip_label") or "")
+                or str(metric.get("id") or "")
+            )
+            latest[key] = metric
+        return sorted(
+            latest.values(),
+            key=lambda item: item.get("recorded_at") or "",
+            reverse=True,
+        )[: max(1, limit)]
 
     def record_metrics(
         self,
@@ -459,6 +480,66 @@ class PerformanceMetricsStore:
             data["items"] = items[-1000:]
             self._write(data)
         return metric
+
+    def record_api_metrics(self, clip: dict[str, Any], video: dict[str, Any]) -> dict[str, Any] | None:
+        video_id = str(video.get("id") or "").strip()
+        if not video_id:
+            return None
+
+        views = max(0, safe_int(video.get("view_count"), 0))
+        likes = max(0, safe_int(video.get("like_count"), 0))
+        comments = max(0, safe_int(video.get("comment_count"), 0))
+        shares = max(0, safe_int(video.get("share_count"), 0))
+        clip_id = str(clip.get("id") or "")
+
+        with self._lock:
+            data = self._read()
+            items = [self._normalize_metric(dict(item)) for item in data.setdefault("items", [])]
+            existing = [
+                item
+                for item in items
+                if str(item.get("clip_id") or "") == clip_id
+                and str(item.get("tiktok_video_id") or "") == video_id
+                and str(item.get("metric_source") or "") == "tiktok_api"
+            ]
+            latest = sorted(existing, key=lambda item: item.get("recorded_at") or "")[-1] if existing else None
+            if latest and all(
+                safe_int(latest.get(field), 0) == value
+                for field, value in {
+                    "views": views,
+                    "likes": likes,
+                    "comments": comments,
+                    "shares": shares,
+                }.items()
+            ):
+                return latest
+
+            metric = self._normalize_metric(
+                {
+                    "id": uuid.uuid4().hex[:12],
+                    "clip_id": clip_id,
+                    "clip_label": clip.get("clip_label") or "",
+                    "source_id": clip.get("source_id") or "",
+                    "source_url": clip.get("source_url") or "",
+                    "source_title": clip.get("source_title") or "",
+                    "views": views,
+                    "likes": likes,
+                    "comments": comments,
+                    "saves": 0,
+                    "shares": shares,
+                    "notes": "Auto-synced from TikTok Display API.",
+                    "recorded_at": utc_now(),
+                    "metric_source": "tiktok_api",
+                    "tiktok_video_id": video_id,
+                    "tiktok_share_url": video.get("share_url") or "",
+                    "tiktok_create_time": safe_int(video.get("create_time"), 0),
+                    "video_description": video.get("video_description") or video.get("title") or "",
+                }
+            )
+            items.append(metric)
+            data["items"] = items[-5000:]
+            self._write(data)
+            return metric
 
     def resolve_clip(self, clip_ref: str) -> dict[str, Any] | None:
         ref = str(clip_ref or "").strip().lower()
@@ -548,6 +629,11 @@ class PerformanceMetricsStore:
             "engagement_rate": engagement_rate,
             "notes": str(metric.get("notes") or ""),
             "recorded_at": str(metric.get("recorded_at") or utc_now()),
+            "metric_source": str(metric.get("metric_source") or "manual"),
+            "tiktok_video_id": str(metric.get("tiktok_video_id") or ""),
+            "tiktok_share_url": str(metric.get("tiktok_share_url") or ""),
+            "tiktok_create_time": safe_int(metric.get("tiktok_create_time"), 0),
+            "video_description": str(metric.get("video_description") or ""),
         }
 
     def _read(self) -> dict[str, Any]:
@@ -634,6 +720,29 @@ class TikTokPublisher:
         if error.get("code") and error.get("code") != "ok":
             raise RuntimeError(error.get("message") or error.get("code"))
         return dict(response.get("data") or {})
+
+    def list_public_videos(self, *, max_count: int = 20, cursor: int | None = None) -> list[dict[str, Any]]:
+        access_token = self.auth.get_valid_access_token()
+        if not access_token:
+            raise RuntimeError("TikTok is not connected or the access token is unavailable.")
+
+        payload: dict[str, Any] = {"max_count": max(1, min(int(max_count), 20))}
+        if cursor is not None:
+            payload["cursor"] = cursor
+
+        response = json_http_request(
+            VIDEO_LIST_URL,
+            method="POST",
+            headers={"Authorization": f"Bearer {access_token}"},
+            payload=payload,
+        )
+        error = response.get("error") or {}
+        if error.get("code") and error.get("code") != "ok":
+            raise RuntimeError(error.get("message") or error.get("code"))
+
+        data = response.get("data") or {}
+        videos = data.get("videos") or []
+        return [dict(video) for video in videos if isinstance(video, dict)]
 
 
 class AutomationJobProxy:
@@ -758,6 +867,13 @@ class AutomationController:
                 "failed": sum(1 for item in queue_items if item.get("status") == "failed"),
             },
             "performance_summary": self.metrics.summary_line(),
+            "auto_metrics": {
+                "token_has_video_list": "video.list" in str(auth_status.get("token_scope") or ""),
+                "last_sync_at": state.get("last_metrics_sync_at") or "",
+                "last_error": state.get("last_metrics_sync_error") or "",
+                "last_matched": safe_int(state.get("last_metrics_sync_matched"), 0),
+                "last_recorded": safe_int(state.get("last_metrics_sync_recorded"), 0),
+            },
             "running": self._running.locked(),
             "tiktok_pending_cap": self.max_pending_shares,
             "tiktok_remote_pending": remote_pending_count,
@@ -845,6 +961,7 @@ class AutomationController:
         return self.metrics.recent_clip_lines(limit)
 
     def performance_summary_text(self, limit: int = 10) -> str:
+        self.sync_public_video_metrics()
         lines = [self.metrics.summary_line(limit)]
         for metric in self.metrics.recent_metrics(limit):
             lines.append(
@@ -854,6 +971,9 @@ class AutomationController:
                 f"{float(metric.get('like_rate') or 0.0) * 100:.1f}% like rate"
             )
         return "\n".join(lines)
+
+    def sync_public_video_metrics(self) -> dict[str, Any]:
+        return self._sync_public_video_metrics()
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -1000,6 +1120,7 @@ class AutomationController:
                     return
 
             self._refresh_remote_statuses()
+            self._sync_public_video_metrics()
 
             if not forced:
                 next_run_at = iso_to_datetime(str(state.get("next_run_at") or ""))
@@ -1101,6 +1222,150 @@ class AutomationController:
                 message = f"{item.get('clip_label')} failed on TikTok: {fail_reason or 'unknown reason'}."
                 self.append_log(message)
                 self.notify(message)
+
+    def _sync_public_video_metrics(self) -> dict[str, Any]:
+        try:
+            videos = self.publisher.list_public_videos(max_count=20)
+        except Exception as exc:
+            message = str(exc)
+            if "scope" not in message.lower() and "permission" not in message.lower():
+                self.append_log(f"Auto metrics sync failed: {message}")
+            self._write_metrics_sync_state(error=message, matched=0, recorded=0)
+            return {"ok": False, "error": message, "matched": 0, "recorded": 0}
+
+        matches = self._match_public_videos_to_clips(videos)
+        recorded = 0
+        auto_posted = 0
+        for clip, video in matches:
+            video_id = str(video.get("id") or "").strip()
+            if not video_id:
+                continue
+
+            update = {
+                "tiktok_video_id": video_id,
+                "tiktok_share_url": str(video.get("share_url") or ""),
+                "tiktok_create_time": safe_int(video.get("create_time"), 0),
+                "auto_metrics_at": utc_now(),
+            }
+            if clip.get("status") == "sent_to_inbox":
+                posted_item = dict(clip)
+                posted_item.update(update)
+                self._mark_item_posted(posted_item, "PUBLIC_VIDEO_LIST", notify=False)
+                auto_posted += 1
+
+            updated_clip = self.post_queue.update_item(str(clip.get("id") or ""), **update) or {**clip, **update}
+            metric = self.metrics.record_api_metrics(updated_clip, video)
+            if metric:
+                recorded += 1
+
+        if matches:
+            self.append_log(f"Auto metrics synced {recorded} public TikTok metric snapshot(s).")
+        self._write_metrics_sync_state(error="", matched=len(matches), recorded=recorded)
+        return {"ok": True, "matched": len(matches), "recorded": recorded, "auto_posted": auto_posted}
+
+    def _write_metrics_sync_state(self, *, error: str, matched: int, recorded: int) -> None:
+        with self._lock:
+            state = self._read_state()
+            state["last_metrics_sync_at"] = utc_now()
+            state["last_metrics_sync_error"] = error
+            state["last_metrics_sync_matched"] = max(0, int(matched))
+            state["last_metrics_sync_recorded"] = max(0, int(recorded))
+            self._write_state(state)
+
+    def _match_public_videos_to_clips(self, videos: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        clips = [
+            item
+            for item in self.post_queue.list_items()
+            if item.get("status") in {"posted", "sent_to_inbox"}
+        ]
+        if not clips or not videos:
+            return []
+
+        matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        used_clip_ids: set[str] = set()
+        used_video_ids: set[str] = set()
+
+        for video in videos:
+            video_id = str(video.get("id") or "").strip()
+            if not video_id:
+                continue
+            direct = next(
+                (
+                    clip
+                    for clip in clips
+                    if str(clip.get("tiktok_video_id") or "") == video_id
+                    and str(clip.get("id") or "") not in used_clip_ids
+                ),
+                None,
+            )
+            if direct:
+                matches.append((direct, video))
+                used_clip_ids.add(str(direct.get("id") or ""))
+                used_video_ids.add(video_id)
+
+        remaining_videos = sorted(
+            [video for video in videos if str(video.get("id") or "") not in used_video_ids],
+            key=lambda video: safe_int(video.get("create_time"), 0),
+        )
+        for video in remaining_videos:
+            video_id = str(video.get("id") or "").strip()
+            best_clip: dict[str, Any] | None = None
+            best_score: float | None = None
+            for clip in clips:
+                clip_id = str(clip.get("id") or "")
+                if not clip_id or clip_id in used_clip_ids:
+                    continue
+                linked_video_id = str(clip.get("tiktok_video_id") or "")
+                if linked_video_id and linked_video_id != video_id:
+                    continue
+
+                score = self._public_video_clip_match_score(video, clip)
+                if score is None:
+                    continue
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_clip = clip
+
+            if best_clip is not None:
+                matches.append((best_clip, video))
+                used_clip_ids.add(str(best_clip.get("id") or ""))
+                used_video_ids.add(video_id)
+
+        return matches
+
+    def _public_video_clip_match_score(self, video: dict[str, Any], clip: dict[str, Any]) -> float | None:
+        create_time = safe_int(video.get("create_time"), 0)
+        if create_time <= 0:
+            return None
+
+        video_dt = datetime.fromtimestamp(create_time, tz=timezone.utc)
+        clip_dt = iso_to_datetime(
+            str(clip.get("posted_at") or clip.get("inbox_delivered_at") or clip.get("updated_at") or "")
+        )
+        if clip_dt is None:
+            return None
+
+        delta_hours = abs((video_dt - clip_dt).total_seconds()) / 3600.0
+        hashtag_hits = self._public_video_hashtag_hits(video)
+        if delta_hours > 72 and hashtag_hits < 2:
+            return None
+
+        video_duration = safe_float(video.get("duration"), 0.0)
+        clip_duration = max(
+            0.0,
+            safe_float(clip.get("segment_end"), 0.0) - safe_float(clip.get("segment_start"), 0.0),
+        )
+        duration_delta = abs(video_duration - clip_duration) if video_duration and clip_duration else 0.0
+        if duration_delta > 12 and hashtag_hits < 2:
+            return None
+
+        return delta_hours + (duration_delta * 3.0) - (hashtag_hits * 6.0)
+
+    def _public_video_hashtag_hits(self, video: dict[str, Any]) -> int:
+        description = repair_mojibake(
+            str(video.get("video_description") or video.get("title") or "")
+        ).casefold()
+        return sum(1 for tag in CANONICAL_TIKTOK_HASHTAGS if tag.casefold() in description)
 
     def _ordered_sources(self) -> list[dict[str, Any]]:
         return sorted(
@@ -1272,16 +1537,19 @@ class AutomationController:
         source_id = str(item.get("source_id") or "")
         publish_id = item.get("publish_id") or ""
 
-        self.post_queue.update_item(
-            item_id,
-            status="posted",
-            publish_id=publish_id,
-            tiktok_status=remote_status,
-            posted_at=utc_now(),
-            attempts=0,
-            next_attempt_at="",
-            error="",
-        )
+        changes = {
+            "status": "posted",
+            "publish_id": publish_id,
+            "tiktok_status": remote_status,
+            "posted_at": utc_now(),
+            "attempts": 0,
+            "next_attempt_at": "",
+            "error": "",
+        }
+        for key in ("tiktok_video_id", "tiktok_share_url", "tiktok_create_time", "auto_metrics_at"):
+            if item.get(key):
+                changes[key] = item.get(key)
+        self.post_queue.update_item(item_id, **changes)
         self.post_queue.delete_asset_for_item(item_id)
 
         if source_id:

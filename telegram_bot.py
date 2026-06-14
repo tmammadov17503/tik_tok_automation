@@ -14,13 +14,14 @@ from urllib.request import Request, urlopen
 
 YOUTUBE_URL_PATTERN = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s<>()]+", re.IGNORECASE)
 TRUE_VALUES = {"1", "true", "yes", "on"}
-BOT_COMMANDS_VERSION = "2026-06-14.cadence-v1"
+BOT_COMMANDS_VERSION = "2026-06-14.auto-metrics-v1"
 BOT_COMMANDS = [
     {"command": "start", "description": "Connect this chat and show help"},
     {"command": "status", "description": "Show automation and inbox counts"},
     {"command": "queue", "description": "Show queued YouTube links and progress"},
     {"command": "clips", "description": "Show recent clip labels for metrics"},
     {"command": "metrics", "description": "Record views likes comments saves shares"},
+    {"command": "syncmetrics", "description": "Auto-sync TikTok public video metrics"},
     {"command": "performance", "description": "Show recent TikTok performance"},
     {"command": "run", "description": "Start one automation run now"},
     {"command": "pause", "description": "Pause scheduled runs"},
@@ -227,6 +228,18 @@ class TelegramBotService:
         if command == "/performance":
             self._send_message(token, chat_id, self.automation.performance_summary_text())
             return
+        if command == "/syncmetrics":
+            result = self.automation.sync_public_video_metrics()
+            if result.get("ok"):
+                self._send_message(
+                    token,
+                    chat_id,
+                    f"Auto metrics sync complete. Matched {result.get('matched', 0)} video(s), "
+                    f"recorded {result.get('recorded', 0)} metric snapshot(s).",
+                )
+            else:
+                self._send_message(token, chat_id, f"Auto metrics sync failed: {result.get('error') or 'unknown error'}")
+            return
         if command == "/metrics":
             self._send_message(token, chat_id, self._record_metrics_text(text))
             return
@@ -281,6 +294,7 @@ class TelegramBotService:
             "/queue - source links and clip progress\n"
             "/clips - recent clip labels for metrics\n"
             "/metrics [clip] views likes comments saves shares - record TikTok results\n"
+            "/syncmetrics - pull public TikTok views/likes automatically\n"
             "/performance - recent views and like-rate summary\n"
             "/run - start a run now\n"
             "/pause - stop scheduled runs\n"
