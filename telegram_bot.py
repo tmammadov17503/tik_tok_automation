@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 
 YOUTUBE_URL_PATTERN = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s<>()]+", re.IGNORECASE)
 TRUE_VALUES = {"1", "true", "yes", "on"}
-BOT_COMMANDS_VERSION = "2026-06-09.metrics-v1"
+BOT_COMMANDS_VERSION = "2026-06-14.cadence-v1"
 BOT_COMMANDS = [
     {"command": "start", "description": "Connect this chat and show help"},
     {"command": "status", "description": "Show automation and inbox counts"},
@@ -24,11 +24,11 @@ BOT_COMMANDS = [
     {"command": "performance", "description": "Show recent TikTok performance"},
     {"command": "run", "description": "Start one automation run now"},
     {"command": "pause", "description": "Pause scheduled runs"},
-    {"command": "resume", "description": "Resume the 12-hour schedule"},
+    {"command": "resume", "description": "Resume the 8-hour schedule"},
     {"command": "posted", "description": "Mark oldest inbox video as posted"},
     {"command": "help", "description": "Show available commands"},
 ]
-DEFAULT_AUTOMATION_INTERVAL_HOURS = 12
+DEFAULT_AUTOMATION_INTERVAL_HOURS = 8
 
 
 def utc_now() -> str:
@@ -284,7 +284,7 @@ class TelegramBotService:
             "/performance - recent views and like-rate summary\n"
             "/run - start a run now\n"
             "/pause - stop scheduled runs\n"
-            "/resume - enable 12-hour schedule\n"
+            f"/resume - enable {DEFAULT_AUTOMATION_INTERVAL_HOURS}-hour schedule\n"
             "/posted - mark the oldest inbox video as posted"
         )
 
