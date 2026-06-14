@@ -1224,6 +1224,17 @@ class AutomationController:
                 self.notify(message)
 
     def _sync_public_video_metrics(self) -> dict[str, Any]:
+        token_scope = str((self.auth.status() or {}).get("token_scope") or "")
+        if "video.list" not in token_scope:
+            self._write_metrics_sync_state(error="", matched=0, recorded=0)
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "TikTok token does not include video.list; automatic metrics are disabled.",
+                "matched": 0,
+                "recorded": 0,
+            }
+
         try:
             videos = self.publisher.list_public_videos(max_count=20)
         except Exception as exc:

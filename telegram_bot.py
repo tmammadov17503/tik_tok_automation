@@ -230,7 +230,13 @@ class TelegramBotService:
             return
         if command == "/syncmetrics":
             result = self.automation.sync_public_video_metrics()
-            if result.get("ok"):
+            if result.get("skipped"):
+                self._send_message(
+                    token,
+                    chat_id,
+                    "Auto metrics are installed but disabled until TikTok grants video.list in the developer app.",
+                )
+            elif result.get("ok"):
                 self._send_message(
                     token,
                     chat_id,
