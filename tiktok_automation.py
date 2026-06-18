@@ -298,6 +298,7 @@ class PostQueueManager:
                             "original_name": original_name,
                             "segment_start": segment.get("start_seconds"),
                             "segment_end": segment.get("end_seconds"),
+                            "segment_excerpt": segment.get("excerpt") or "",
                             "status": "pending",
                             "hashtags": list(self.default_hashtags),
                             "created_at": now,
@@ -393,6 +394,7 @@ class PostQueueManager:
             "original_name": str(item.get("original_name") or ""),
             "segment_start": safe_float(item.get("segment_start"), 0.0),
             "segment_end": safe_float(item.get("segment_end"), 0.0),
+            "segment_excerpt": str(item.get("segment_excerpt") or ""),
             "status": str(item.get("status") or "pending"),
             "publish_id": str(item.get("publish_id") or ""),
             "tiktok_status": str(item.get("tiktok_status") or ""),
@@ -879,7 +881,77 @@ class AutomationController:
 
     def _caption_hint_for_item(self, item: dict[str, Any]) -> str:
         hashtags = normalize_tiktok_hashtags(item.get("hashtags") or self.post_queue.default_hashtags)
-        return f"{' '.join(hashtags)} {CAPTION_EMOJI}".strip()
+        hook = self._caption_hook_for_item(item)
+        tag_line = f"{' '.join(hashtags)} {CAPTION_EMOJI}".strip()
+        return f"{hook}\n{tag_line}".strip() if hook else tag_line
+
+    def _caption_hook_for_item(self, item: dict[str, Any]) -> str:
+        excerpt = repair_mojibake(str(item.get("segment_excerpt") or "")).strip()
+        excerpt_key = excerpt.casefold()
+        label_seed = (
+            str(item.get("source_id") or "")
+            + str(item.get("clip_label") or "")
+            + str(item.get("segment_start") or "")
+        )
+
+        keyword_hooks = [
+            (
+                ("почему", "зачем", "как ", "?", "why", "how"),
+                [
+                    "Вопрос, после которого всё меняется 😳",
+                    "Сейчас будет ответ, который цепляет 👀",
+                ],
+            ),
+            (
+                ("стой", "тихо", "подожди", "стоп", "wait", "stop"),
+                [
+                    "Вот тут сцена резко становится напряженной 😳",
+                    "С этого момента уже не оторваться 👀",
+                ],
+            ),
+            (
+                ("деньги", "власть", "работ", "план", "money", "power", "plan"),
+                [
+                    "Когда обычный разговор становится серьезным 😳",
+                    "Этот момент звучит слишком жизненно 👀",
+                ],
+            ),
+            (
+                ("люб", "сердц", "чувств", "love", "heart"),
+                [
+                    "Тут эмоции сказали больше, чем слова 🫠",
+                    "Этот момент попадает прямо в чувства 😳",
+                ],
+            ),
+            (
+                ("!", "серьезно", "правда", "real"),
+                [
+                    "Вот это поворот, конечно 😳",
+                    "Момент, который хочется пересмотреть 👀",
+                ],
+            ),
+        ]
+        for tokens, hooks in keyword_hooks:
+            if any(token in excerpt_key for token in tokens):
+                return self._stable_choice(hooks, label_seed + excerpt_key)
+
+        generic_hooks = [
+            "Этот диалог надо досмотреть до конца 👀",
+            "Вот здесь начинается самое интересное 😳",
+            "Сцена, которая цепляет с первых секунд 🫢",
+            "Тот самый момент, когда всё становится понятно 👀",
+            "Этот момент слишком жизненный 😳",
+            "Кажется, дальше будет только хуже 🫣",
+            "Вот за такие сцены мы и любим кино 👀",
+            "Сначала смешно, потом уже не очень 😳",
+        ]
+        return self._stable_choice(generic_hooks, label_seed + excerpt_key)
+
+    def _stable_choice(self, values: list[str], seed: str) -> str:
+        if not values:
+            return ""
+        score = sum((index + 1) * ord(char) for index, char in enumerate(seed or "caption"))
+        return values[score % len(values)]
 
     def _caption_paste_message(self, item: dict[str, Any]) -> str:
         caption = self._caption_hint_for_item(item)
