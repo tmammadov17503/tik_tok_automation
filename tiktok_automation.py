@@ -26,6 +26,7 @@ POST_QUEUE_KEEP_STATES = {"pending", "uploading", "processing", "sent_to_inbox",
 DEFAULT_TIKTOK_MAX_PENDING_SHARES = 5
 DEFAULT_UPLOAD_MAX_ATTEMPTS = 4
 DEFAULT_AUTOMATION_INTERVAL_HOURS = 8
+DEFAULT_TIKTOK_PUBLIC_USERNAME = "film.box.official"
 CANONICAL_TIKTOK_HASHTAGS = [
     "#fyp",
     "#\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438",
@@ -482,6 +483,21 @@ class PerformanceMetricsStore:
         return metric
 
     def record_api_metrics(self, clip: dict[str, Any], video: dict[str, Any]) -> dict[str, Any] | None:
+        return self.record_public_video_metrics(
+            clip,
+            video,
+            metric_source="tiktok_api",
+            notes="Auto-synced from TikTok Display API.",
+        )
+
+    def record_public_video_metrics(
+        self,
+        clip: dict[str, Any],
+        video: dict[str, Any],
+        *,
+        metric_source: str,
+        notes: str,
+    ) -> dict[str, Any] | None:
         video_id = str(video.get("id") or "").strip()
         if not video_id:
             return None
@@ -500,7 +516,7 @@ class PerformanceMetricsStore:
                 for item in items
                 if str(item.get("clip_id") or "") == clip_id
                 and str(item.get("tiktok_video_id") or "") == video_id
-                and str(item.get("metric_source") or "") == "tiktok_api"
+                and str(item.get("metric_source") or "") == metric_source
             ]
             latest = sorted(existing, key=lambda item: item.get("recorded_at") or "")[-1] if existing else None
             if latest and all(
@@ -527,9 +543,9 @@ class PerformanceMetricsStore:
                     "comments": comments,
                     "saves": 0,
                     "shares": shares,
-                    "notes": "Auto-synced from TikTok Display API.",
+                    "notes": notes,
                     "recorded_at": utc_now(),
-                    "metric_source": "tiktok_api",
+                    "metric_source": metric_source,
                     "tiktok_video_id": video_id,
                     "tiktok_share_url": video.get("share_url") or "",
                     "tiktok_create_time": safe_int(video.get("create_time"), 0),
@@ -744,6 +760,57 @@ class TikTokPublisher:
         videos = data.get("videos") or []
         return [dict(video) for video in videos if isinstance(video, dict)]
 
+    def list_public_profile_videos(self, username: str, *, max_count: int = 20) -> list[dict[str, Any]]:
+        clean_username = str(username or "").strip().lstrip("@")
+        if not clean_username:
+            return []
+        try:
+            from yt_dlp import YoutubeDL
+        except Exception as exc:
+            raise RuntimeError("yt-dlp is not available for public profile metrics.") from exc
+
+        url = f"https://www.tiktok.com/@{clean_username}"
+        options = {
+            "quiet": True,
+            "skip_download": True,
+            "extract_flat": True,
+            "playlistend": max(1, min(int(max_count), 50)),
+            "socket_timeout": 20,
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 Chrome/125 Safari/537.36"
+                )
+            },
+        }
+        try:
+            with YoutubeDL(options) as ydl:
+                data = ydl.extract_info(url, download=False)
+        except Exception as exc:
+            raise RuntimeError(f"Public TikTok profile metrics unavailable: {exc}") from exc
+
+        videos: list[dict[str, Any]] = []
+        for entry in (data or {}).get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            video_id = str(entry.get("id") or "").strip()
+            if not video_id:
+                continue
+            videos.append(
+                {
+                    "id": video_id,
+                    "create_time": safe_int(entry.get("timestamp"), 0),
+                    "share_url": entry.get("url") or f"https://www.tiktok.com/@{clean_username}/video/{video_id}",
+                    "video_description": entry.get("description") or entry.get("title") or "",
+                    "duration": safe_float(entry.get("duration"), 0.0),
+                    "view_count": safe_int(entry.get("view_count"), 0),
+                    "like_count": safe_int(entry.get("like_count"), 0),
+                    "comment_count": safe_int(entry.get("comment_count"), 0),
+                    "share_count": safe_int(entry.get("repost_count"), 0),
+                }
+            )
+        return videos
+
 
 class AutomationJobProxy:
     def __init__(self, controller: "AutomationController", source_entry: dict[str, Any]) -> None:
@@ -869,6 +936,8 @@ class AutomationController:
             "performance_summary": self.metrics.summary_line(),
             "auto_metrics": {
                 "token_has_video_list": "video.list" in str(auth_status.get("token_scope") or ""),
+                "public_profile_fallback": True,
+                "public_profile_username": os.getenv("TIKTOK_PUBLIC_USERNAME", DEFAULT_TIKTOK_PUBLIC_USERNAME),
                 "last_sync_at": state.get("last_metrics_sync_at") or "",
                 "last_error": state.get("last_metrics_sync_error") or "",
                 "last_matched": safe_int(state.get("last_metrics_sync_matched"), 0),
@@ -1225,18 +1294,18 @@ class AutomationController:
 
     def _sync_public_video_metrics(self) -> dict[str, Any]:
         token_scope = str((self.auth.status() or {}).get("token_scope") or "")
-        if "video.list" not in token_scope:
-            self._write_metrics_sync_state(error="", matched=0, recorded=0)
-            return {
-                "ok": True,
-                "skipped": True,
-                "reason": "TikTok token does not include video.list; automatic metrics are disabled.",
-                "matched": 0,
-                "recorded": 0,
-            }
-
+        metric_source = "tiktok_api"
+        notes = "Auto-synced from TikTok Display API."
         try:
-            videos = self.publisher.list_public_videos(max_count=20)
+            if "video.list" in token_scope:
+                videos = self.publisher.list_public_videos(max_count=20)
+            else:
+                metric_source = "public_profile"
+                notes = "Auto-synced from public TikTok profile metadata."
+                videos = self.publisher.list_public_profile_videos(
+                    os.getenv("TIKTOK_PUBLIC_USERNAME", DEFAULT_TIKTOK_PUBLIC_USERNAME),
+                    max_count=20,
+                )
         except Exception as exc:
             message = str(exc)
             if "scope" not in message.lower() and "permission" not in message.lower():
@@ -1265,7 +1334,12 @@ class AutomationController:
                 auto_posted += 1
 
             updated_clip = self.post_queue.update_item(str(clip.get("id") or ""), **update) or {**clip, **update}
-            metric = self.metrics.record_api_metrics(updated_clip, video)
+            metric = self.metrics.record_public_video_metrics(
+                updated_clip,
+                video,
+                metric_source=metric_source,
+                notes=notes,
+            )
             if metric:
                 recorded += 1
 
