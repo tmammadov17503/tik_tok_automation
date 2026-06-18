@@ -136,7 +136,10 @@ class TelegramBotService:
         if not config.get("enabled") or not token or not chat_id:
             return
         try:
-            self._send_message(token, chat_id, message)
+            main_message, caption = self._extract_caption_copy_payload(message)
+            self._send_message(token, chat_id, main_message)
+            if caption:
+                self._send_copyable_caption(token, chat_id, caption)
         except Exception as exc:
             self._save_error(str(exc))
 
@@ -418,10 +421,47 @@ class TelegramBotService:
             raise ValueError("Metrics cannot be negative.")
         return int(round(number * multiplier))
 
-    def _send_message(self, token: str, chat_id: str, text: str) -> None:
+    def _extract_caption_copy_payload(self, message: str) -> tuple[str, str]:
+        marker = "Caption to paste in TikTok:\n"
+        if marker not in message:
+            return message, ""
+
+        before, after = message.split(marker, 1)
+        caption, separator, _footer = after.partition("\nTikTok inbox uploads")
+        caption = caption.strip()
+        main_message = before.rstrip()
+        if separator:
+            main_message = f"{main_message}\nCaption sent below. Use the copy button, then paste it in TikTok.".strip()
+        return main_message or "Video sent to TikTok inbox.", caption
+
+    def _send_copyable_caption(self, token: str, chat_id: str, caption: str) -> None:
+        reply_markup = None
+        if 1 <= len(caption) <= 256:
+            reply_markup = {
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "Copy caption",
+                            "copy_text": {"text": caption},
+                        }
+                    ]
+                ]
+            }
+        try:
+            self._send_message(token, chat_id, caption, reply_markup=reply_markup)
+        except RuntimeError as exc:
+            if reply_markup and "copy" in str(exc).lower():
+                self._send_message(token, chat_id, caption)
+                return
+            raise
+
+    def _send_message(self, token: str, chat_id: str, text: str, reply_markup: dict[str, Any] | None = None) -> None:
         chunks = [text[index : index + 3900] for index in range(0, len(text), 3900)] or [text]
-        for chunk in chunks:
-            self._telegram_request(token, "sendMessage", {"chat_id": chat_id, "text": chunk})
+        for index, chunk in enumerate(chunks):
+            payload: dict[str, Any] = {"chat_id": chat_id, "text": chunk}
+            if reply_markup is not None and index == len(chunks) - 1:
+                payload["reply_markup"] = reply_markup
+            self._telegram_request(token, "sendMessage", payload)
 
     def _telegram_request(self, token: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = f"https://api.telegram.org/bot{token}/{method}"

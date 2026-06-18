@@ -1261,12 +1261,13 @@ class AutomationController:
                     return
 
             self._refresh_remote_statuses()
-            self._sync_public_video_metrics()
 
             if not forced:
                 next_run_at = iso_to_datetime(str(state.get("next_run_at") or ""))
                 if next_run_at and next_run_at > datetime.now(timezone.utc):
                     return
+
+            self._sync_public_video_metrics()
 
             sequence_source = self._current_sequence_source()
             sequence_source_id = str(sequence_source.get("id") or "") if sequence_source else None
