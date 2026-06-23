@@ -429,18 +429,23 @@ class PerformanceMetricsStore:
         return sorted(items, key=lambda item: item.get("recorded_at") or "", reverse=False)
 
     def recent_metrics(self, limit: int = 10) -> list[dict[str, Any]]:
+        return sorted(
+            self.latest_metrics_by_clip(),
+            key=lambda item: item.get("recorded_at") or "",
+            reverse=True,
+        )[: max(1, limit)]
+
+    def latest_metrics_by_clip(self) -> list[dict[str, Any]]:
         latest: dict[str, dict[str, Any]] = {}
         for metric in self.list_metrics():
-            key = (
-                str(metric.get("clip_id") or "")
-                or str(metric.get("tiktok_video_id") or "")
-                or str(metric.get("clip_label") or "")
-                or str(metric.get("id") or "")
-            )
+            key = self._metric_identity(metric)
             latest[key] = metric
+        return list(latest.values())
+
+    def top_metrics(self, limit: int = 5) -> list[dict[str, Any]]:
         return sorted(
-            latest.values(),
-            key=lambda item: item.get("recorded_at") or "",
+            self.latest_metrics_by_clip(),
+            key=lambda item: int(item.get("views") or 0),
             reverse=True,
         )[: max(1, limit)]
 
@@ -552,6 +557,9 @@ class PerformanceMetricsStore:
                     "tiktok_share_url": video.get("share_url") or "",
                     "tiktok_create_time": safe_int(video.get("create_time"), 0),
                     "video_description": video.get("video_description") or video.get("title") or "",
+                    "segment_start": clip.get("segment_start"),
+                    "segment_end": clip.get("segment_end"),
+                    "segment_excerpt": clip.get("segment_excerpt") or "",
                 }
             )
             items.append(metric)
@@ -623,6 +631,180 @@ class PerformanceMetricsStore:
             f"engagement {engagement:.1f}%."
         )
 
+    def insights_text(self, limit: int = 10) -> str:
+        metrics = self.latest_metrics_by_clip()
+        if not metrics:
+            return "No TikTok performance metrics recorded yet."
+
+        views = sorted(int(item.get("views") or 0) for item in metrics)
+        total_views = sum(views)
+        median_views = self._median(views)
+        avg_views = total_views / len(metrics) if metrics else 0.0
+        top = self.top_metrics(5)
+        source_rows = self.source_scorecard()
+        weak_rows = [
+            row
+            for row in source_rows
+            if row["clips"] >= 3 and row["avg_views"] < 120 and row["like_rate"] < 0.05
+        ]
+
+        lines = [
+            self.summary_line(limit),
+            "",
+            f"Tracked clips: {len(metrics)} | Total tracked views: {compact_number(total_views)} | "
+            f"Avg: {compact_number(avg_views)} | Median: {compact_number(median_views)}",
+            "",
+            "Top clips",
+        ]
+        for index, metric in enumerate(top, start=1):
+            views_count = int(metric.get("views") or 0)
+            likes = int(metric.get("likes") or 0)
+            like_rate = float(metric.get("like_rate") or 0.0) * 100
+            multiplier = views_count / median_views if median_views else 0.0
+            label = metric.get("clip_label") or metric.get("clip_id") or "clip"
+            lines.append(
+                f"{index}. {label}: {compact_number(views_count)} views, "
+                f"{compact_number(likes)} likes, {like_rate:.1f}% like rate"
+                + (f", {multiplier:.1f}x median" if multiplier >= 2 else "")
+            )
+            share_url = str(metric.get("tiktok_share_url") or "").strip()
+            if index == 1 and share_url:
+                lines.append(f"   TikTok: {share_url}")
+            moment = self._metric_moment_line(metric)
+            if moment:
+                lines.append(f"   {moment}")
+
+        if source_rows:
+            lines.extend(["", "Best sources"])
+            for row in source_rows[:5]:
+                lines.append(
+                    f"- {self._short_source(row['source_url'])}: {row['clips']} clips, "
+                    f"{compact_number(row['views'])} views total, "
+                    f"{compact_number(row['avg_views'])} avg, {row['like_rate'] * 100:.1f}% like rate"
+                )
+
+        recommendation = self._recommendation_line(top[0] if top else None, source_rows, weak_rows, median_views)
+        if recommendation:
+            lines.extend(["", "Next move", recommendation])
+
+        return "\n".join(lines)
+
+    def source_scorecard(self) -> list[dict[str, Any]]:
+        rows: dict[str, dict[str, Any]] = {}
+        for metric in self.latest_metrics_by_clip():
+            source_url = str(metric.get("source_url") or metric.get("source_id") or "unknown")
+            row = rows.setdefault(
+                source_url,
+                {
+                    "source_url": source_url,
+                    "source_title": str(metric.get("source_title") or ""),
+                    "clips": 0,
+                    "views": 0,
+                    "likes": 0,
+                    "comments": 0,
+                    "saves": 0,
+                    "shares": 0,
+                    "avg_views": 0.0,
+                    "like_rate": 0.0,
+                    "engagement_rate": 0.0,
+                },
+            )
+            row["clips"] += 1
+            row["views"] += int(metric.get("views") or 0)
+            row["likes"] += int(metric.get("likes") or 0)
+            row["comments"] += int(metric.get("comments") or 0)
+            row["saves"] += int(metric.get("saves") or 0)
+            row["shares"] += int(metric.get("shares") or 0)
+
+        for row in rows.values():
+            views = max(0, int(row["views"]))
+            row["avg_views"] = views / max(1, int(row["clips"]))
+            row["like_rate"] = (int(row["likes"]) / views) if views else 0.0
+            row["engagement_rate"] = (
+                (int(row["likes"]) + int(row["comments"]) + int(row["saves"]) + int(row["shares"])) / views
+                if views
+                else 0.0
+            )
+
+        return sorted(
+            rows.values(),
+            key=lambda row: (float(row["avg_views"]), float(row["like_rate"]), int(row["views"])),
+            reverse=True,
+        )
+
+    def _metric_identity(self, metric: dict[str, Any]) -> str:
+        return (
+            str(metric.get("clip_id") or "")
+            or str(metric.get("tiktok_video_id") or "")
+            or str(metric.get("clip_label") or "")
+            or str(metric.get("id") or "")
+        )
+
+    @staticmethod
+    def _median(values: list[int]) -> float:
+        if not values:
+            return 0.0
+        midpoint = len(values) // 2
+        if len(values) % 2:
+            return float(values[midpoint])
+        return (float(values[midpoint - 1]) + float(values[midpoint])) / 2.0
+
+    @staticmethod
+    def _short_source(source_url: str) -> str:
+        text = str(source_url or "unknown")
+        if "youtu.be/" in text:
+            return text.split("youtu.be/", 1)[1].split("?", 1)[0]
+        if "v=" in text:
+            return text.split("v=", 1)[1].split("&", 1)[0]
+        return text[:42] + ("..." if len(text) > 42 else "")
+
+    def _metric_moment_line(self, metric: dict[str, Any]) -> str:
+        excerpt = repair_mojibake(str(metric.get("segment_excerpt") or "")).strip()
+        if excerpt:
+            return f"Moment: {excerpt[:130]}"
+
+        description = repair_mojibake(str(metric.get("video_description") or "")).strip()
+        hook = description.split("#", 1)[0].strip()
+        if hook:
+            return f"Hook: {hook[:130]}"
+
+        start = safe_float(metric.get("segment_start"), 0.0)
+        end = safe_float(metric.get("segment_end"), 0.0)
+        if end > start:
+            return f"Timing: {self._format_seconds(start)}-{self._format_seconds(end)}"
+        return ""
+
+    @staticmethod
+    def _format_seconds(value: float) -> str:
+        total = max(0, int(round(float(value))))
+        minutes, seconds = divmod(total, 60)
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _recommendation_line(
+        self,
+        top_metric: dict[str, Any] | None,
+        source_rows: list[dict[str, Any]],
+        weak_rows: list[dict[str, Any]],
+        median_views: float,
+    ) -> str:
+        if not top_metric:
+            return ""
+        top_views = int(top_metric.get("views") or 0)
+        top_source = str(top_metric.get("source_url") or "")
+        if top_views >= max(1000, median_views * 5):
+            return (
+                f"Clone the pattern from {self._short_source(top_source)} first: queue more scenes with the same "
+                "dialogue tension/curiosity style, and keep weak sources paused until we have another winner."
+            )
+        if source_rows and float(source_rows[0].get("like_rate") or 0.0) >= 0.07:
+            return (
+                f"Prioritize sources similar to {self._short_source(str(source_rows[0].get('source_url') or ''))}; "
+                "the views are smaller, but the audience reaction is strong."
+            )
+        if weak_rows:
+            return "A few sources are below 120 average views with weak like rate; replace those with stronger hooks."
+        return "Keep the 8-hour cadence and add fresh sources; the account is still building a reliable baseline."
+
     def _normalize_metric(self, metric: dict[str, Any]) -> dict[str, Any]:
         views = max(0, safe_int(metric.get("views"), 0))
         likes = max(0, safe_int(metric.get("likes"), 0))
@@ -652,6 +834,9 @@ class PerformanceMetricsStore:
             "tiktok_share_url": str(metric.get("tiktok_share_url") or ""),
             "tiktok_create_time": safe_int(metric.get("tiktok_create_time"), 0),
             "video_description": str(metric.get("video_description") or ""),
+            "segment_start": safe_float(metric.get("segment_start"), 0.0),
+            "segment_end": safe_float(metric.get("segment_end"), 0.0),
+            "segment_excerpt": str(metric.get("segment_excerpt") or ""),
         }
 
     def _read(self) -> dict[str, Any]:
@@ -774,6 +959,7 @@ class TikTokPublisher:
         url = f"https://www.tiktok.com/@{clean_username}"
         options = {
             "quiet": True,
+            "no_warnings": True,
             "skip_download": True,
             "extract_flat": True,
             "playlistend": max(1, min(int(max_count), 50)),
@@ -1103,15 +1289,7 @@ class AutomationController:
 
     def performance_summary_text(self, limit: int = 10) -> str:
         self.sync_public_video_metrics()
-        lines = [self.metrics.summary_line(limit)]
-        for metric in self.metrics.recent_metrics(limit):
-            lines.append(
-                f"- {metric.get('clip_label') or metric.get('clip_id')}: "
-                f"{compact_number(metric.get('views') or 0)} views, "
-                f"{compact_number(metric.get('likes') or 0)} likes, "
-                f"{float(metric.get('like_rate') or 0.0) * 100:.1f}% like rate"
-            )
-        return "\n".join(lines)
+        return self.metrics.insights_text(limit)
 
     def sync_public_video_metrics(self) -> dict[str, Any]:
         return self._sync_public_video_metrics()
@@ -1377,7 +1555,7 @@ class AutomationController:
                 notes = "Auto-synced from public TikTok profile metadata."
                 videos = self.publisher.list_public_profile_videos(
                     os.getenv("TIKTOK_PUBLIC_USERNAME", DEFAULT_TIKTOK_PUBLIC_USERNAME),
-                    max_count=20,
+                    max_count=50,
                 )
         except Exception as exc:
             message = str(exc)
@@ -1389,6 +1567,7 @@ class AutomationController:
         matches = self._match_public_videos_to_clips(videos)
         recorded = 0
         auto_posted = 0
+        recorded_metrics: list[dict[str, Any]] = []
         for clip, video in matches:
             video_id = str(video.get("id") or "").strip()
             if not video_id:
@@ -1415,11 +1594,59 @@ class AutomationController:
             )
             if metric:
                 recorded += 1
+                recorded_metrics.append(metric)
 
         if matches:
             self.append_log(f"Auto metrics synced {recorded} public TikTok metric snapshot(s).")
+        self._notify_metric_breakouts(recorded_metrics)
         self._write_metrics_sync_state(error="", matched=len(matches), recorded=recorded)
         return {"ok": True, "matched": len(matches), "recorded": recorded, "auto_posted": auto_posted}
+
+    def _notify_metric_breakouts(self, metrics: list[dict[str, Any]]) -> None:
+        candidates = [
+            metric
+            for metric in metrics
+            if self._is_breakout_metric(metric)
+        ]
+        if not candidates:
+            return
+
+        candidates = sorted(candidates, key=lambda item: int(item.get("views") or 0), reverse=True)
+        with self._lock:
+            state = self._read_state()
+            notified = {str(item) for item in state.get("notified_breakout_video_ids") or []}
+            fresh = []
+            for metric in candidates:
+                key = str(metric.get("tiktok_video_id") or metric.get("clip_id") or "").strip()
+                if key and key not in notified:
+                    fresh.append(metric)
+                    notified.add(key)
+            if not fresh:
+                return
+            state["notified_breakout_video_ids"] = sorted(notified)[-100:]
+            self._write_state(state)
+
+        for metric in fresh[:3]:
+            views = int(metric.get("views") or 0)
+            likes = int(metric.get("likes") or 0)
+            like_rate = float(metric.get("like_rate") or 0.0) * 100
+            label = metric.get("clip_label") or "clip"
+            source = PerformanceMetricsStore._short_source(str(metric.get("source_url") or ""))
+            message = (
+                f"Trend alert: {label} reached {compact_number(views)} views "
+                f"with {compact_number(likes)} likes ({like_rate:.1f}% like rate).\n"
+                f"Source pattern: {source}\n"
+                "Next: queue more scenes with the same dialogue tension/curiosity style."
+            )
+            share_url = str(metric.get("tiktok_share_url") or "").strip()
+            if share_url:
+                message += f"\nTikTok: {share_url}"
+            self.notify(message)
+
+    def _is_breakout_metric(self, metric: dict[str, Any]) -> bool:
+        views = int(metric.get("views") or 0)
+        like_rate = float(metric.get("like_rate") or 0.0)
+        return views >= 3000 or (views >= 1000 and like_rate >= 0.03)
 
     def _write_metrics_sync_state(self, *, error: str, matched: int, recorded: int) -> None:
         with self._lock:
