@@ -282,6 +282,10 @@ class TikTokMongoSync:
             comments = max(0, int(metric.get("comments") or 0))
             saves = max(0, int(metric.get("saves") or 0))
             shares = max(0, int(metric.get("shares") or 0))
+            average_watch_seconds = max(0.0, float(metric.get("average_watch_seconds") or 0.0))
+            watched_full_rate = max(0.0, min(float(metric.get("watched_full_rate") or 0.0), 1.0))
+            new_followers = max(0, int(metric.get("new_followers") or 0))
+            total_play_time_seconds = max(0, int(metric.get("total_play_time_seconds") or 0))
             doc = add_date_fields(
                 {
                     **metric,
@@ -293,8 +297,13 @@ class TikTokMongoSync:
                     "comments": comments,
                     "saves": saves,
                     "shares": shares,
+                    "average_watch_seconds": average_watch_seconds,
+                    "watched_full_rate": watched_full_rate,
+                    "new_followers": new_followers,
+                    "total_play_time_seconds": total_play_time_seconds,
                     "like_rate": (likes / views) if views else 0.0,
                     "engagement_rate": ((likes + comments + saves + shares) / views) if views else 0.0,
+                    "follower_conversion_rate": (new_followers / views) if views else 0.0,
                     "last_synced_at": now,
                 }
             )

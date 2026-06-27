@@ -439,7 +439,7 @@ class PerformanceMetricsStore:
         latest: dict[str, dict[str, Any]] = {}
         for metric in self.list_metrics():
             key = self._metric_identity(metric)
-            latest[key] = metric
+            latest[key] = self._merge_metric_snapshot(latest.get(key), metric)
         return list(latest.values())
 
     def top_metrics(self, limit: int = 5) -> list[dict[str, Any]]:
@@ -458,6 +458,11 @@ class PerformanceMetricsStore:
         comments: int = 0,
         saves: int = 0,
         shares: int = 0,
+        average_watch_seconds: float = 0.0,
+        watched_full_rate: float = 0.0,
+        new_followers: int = 0,
+        total_play_time_seconds: int = 0,
+        metric_source: str = "manual",
         notes: str = "",
     ) -> dict[str, Any]:
         clip = self.resolve_clip(clip_ref)
@@ -477,8 +482,20 @@ class PerformanceMetricsStore:
                 "comments": max(0, int(comments)),
                 "saves": max(0, int(saves)),
                 "shares": max(0, int(shares)),
+                "average_watch_seconds": max(0.0, float(average_watch_seconds or 0.0)),
+                "watched_full_rate": max(0.0, min(float(watched_full_rate or 0.0), 1.0)),
+                "new_followers": max(0, int(new_followers or 0)),
+                "total_play_time_seconds": max(0, int(total_play_time_seconds or 0)),
                 "notes": notes.strip(),
                 "recorded_at": utc_now(),
+                "metric_source": metric_source,
+                "tiktok_video_id": clip.get("tiktok_video_id") or "",
+                "tiktok_share_url": clip.get("tiktok_share_url") or "",
+                "tiktok_create_time": clip.get("tiktok_create_time") or 0,
+                "video_description": clip.get("video_description") or "",
+                "segment_start": clip.get("segment_start"),
+                "segment_end": clip.get("segment_end"),
+                "segment_excerpt": clip.get("segment_excerpt") or "",
             }
         )
         with self._lock:
@@ -673,6 +690,9 @@ class PerformanceMetricsStore:
             moment = self._metric_moment_line(metric)
             if moment:
                 lines.append(f"   {moment}")
+            studio = self._metric_studio_line(metric)
+            if studio:
+                lines.append(f"   Studio: {studio}")
 
         if source_rows:
             lines.extend(["", "Best sources"])
@@ -681,6 +701,7 @@ class PerformanceMetricsStore:
                     f"- {self._short_source(row['source_url'])}: {row['clips']} clips, "
                     f"{compact_number(row['views'])} views total, "
                     f"{compact_number(row['avg_views'])} avg, {row['like_rate'] * 100:.1f}% like rate"
+                    + (f", +{compact_number(row['new_followers'])} followers" if row["new_followers"] else "")
                 )
 
         recommendation = self._recommendation_line(top[0] if top else None, source_rows, weak_rows, median_views)
@@ -704,9 +725,13 @@ class PerformanceMetricsStore:
                     "comments": 0,
                     "saves": 0,
                     "shares": 0,
+                    "new_followers": 0,
+                    "watch_weighted_seconds": 0.0,
+                    "watch_weighted_views": 0,
                     "avg_views": 0.0,
                     "like_rate": 0.0,
                     "engagement_rate": 0.0,
+                    "average_watch_seconds": 0.0,
                 },
             )
             row["clips"] += 1
@@ -715,6 +740,12 @@ class PerformanceMetricsStore:
             row["comments"] += int(metric.get("comments") or 0)
             row["saves"] += int(metric.get("saves") or 0)
             row["shares"] += int(metric.get("shares") or 0)
+            row["new_followers"] += int(metric.get("new_followers") or 0)
+            avg_watch = float(metric.get("average_watch_seconds") or 0.0)
+            metric_views = int(metric.get("views") or 0)
+            if avg_watch and metric_views:
+                row["watch_weighted_seconds"] += avg_watch * metric_views
+                row["watch_weighted_views"] += metric_views
 
         for row in rows.values():
             views = max(0, int(row["views"]))
@@ -725,6 +756,8 @@ class PerformanceMetricsStore:
                 if views
                 else 0.0
             )
+            watch_views = max(0, int(row["watch_weighted_views"]))
+            row["average_watch_seconds"] = (float(row["watch_weighted_seconds"]) / watch_views) if watch_views else 0.0
 
         return sorted(
             rows.values(),
@@ -739,6 +772,42 @@ class PerformanceMetricsStore:
             or str(metric.get("clip_label") or "")
             or str(metric.get("id") or "")
         )
+
+    def _merge_metric_snapshot(
+        self,
+        previous: dict[str, Any] | None,
+        current: dict[str, Any],
+    ) -> dict[str, Any]:
+        if previous is None:
+            return current
+        merged = {**previous, **current}
+        for field in (
+            "saves",
+            "average_watch_seconds",
+            "watched_full_rate",
+            "new_followers",
+            "total_play_time_seconds",
+            "segment_start",
+            "segment_end",
+            "segment_excerpt",
+        ):
+            current_value = current.get(field)
+            previous_value = previous.get(field)
+            if (current_value in {"", None, 0, 0.0}) and previous_value not in {"", None, 0, 0.0}:
+                merged[field] = previous_value
+        merged["like_rate"] = (int(merged.get("likes") or 0) / int(merged.get("views") or 0)) if int(merged.get("views") or 0) else 0.0
+        merged["engagement_rate"] = (
+            (
+                int(merged.get("likes") or 0)
+                + int(merged.get("comments") or 0)
+                + int(merged.get("saves") or 0)
+                + int(merged.get("shares") or 0)
+            )
+            / int(merged.get("views") or 0)
+            if int(merged.get("views") or 0)
+            else 0.0
+        )
+        return merged
 
     @staticmethod
     def _median(values: list[int]) -> float:
@@ -774,11 +843,41 @@ class PerformanceMetricsStore:
             return f"Timing: {self._format_seconds(start)}-{self._format_seconds(end)}"
         return ""
 
+    def _metric_studio_line(self, metric: dict[str, Any]) -> str:
+        parts: list[str] = []
+        avg_watch = float(metric.get("average_watch_seconds") or 0.0)
+        full_rate = float(metric.get("watched_full_rate") or 0.0)
+        followers = int(metric.get("new_followers") or 0)
+        play_time = int(metric.get("total_play_time_seconds") or 0)
+        saves = int(metric.get("saves") or 0)
+        if avg_watch:
+            parts.append(f"avg watch {avg_watch:.1f}s")
+        if full_rate:
+            parts.append(f"full watch {full_rate * 100:.1f}%")
+        if saves:
+            parts.append(f"{compact_number(saves)} saves")
+        if followers:
+            parts.append(f"+{compact_number(followers)} followers")
+        if play_time:
+            parts.append(f"play time {self._format_duration(play_time)}")
+        return ", ".join(parts)
+
     @staticmethod
     def _format_seconds(value: float) -> str:
         total = max(0, int(round(float(value))))
         minutes, seconds = divmod(total, 60)
         return f"{minutes:02d}:{seconds:02d}"
+
+    @staticmethod
+    def _format_duration(seconds: int | float) -> str:
+        total = max(0, int(round(float(seconds))))
+        hours, remainder = divmod(total, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return f"{hours}h{minutes:02d}m"
+        if minutes:
+            return f"{minutes}m{seconds:02d}s"
+        return f"{seconds}s"
 
     def _recommendation_line(
         self,
@@ -792,9 +891,13 @@ class PerformanceMetricsStore:
         top_views = int(top_metric.get("views") or 0)
         top_source = str(top_metric.get("source_url") or "")
         if top_views >= max(1000, median_views * 5):
+            studio_line = ""
+            if float(top_metric.get("watched_full_rate") or 0.0) >= 0.35 or int(top_metric.get("new_followers") or 0) >= 10:
+                studio_line = " Retention/follower quality is strong, so this is a real repeat candidate."
             return (
                 f"Clone the pattern from {self._short_source(top_source)} first: queue more scenes with the same "
                 "dialogue tension/curiosity style, and keep weak sources paused until we have another winner."
+                + studio_line
             )
         if source_rows and float(source_rows[0].get("like_rate") or 0.0) >= 0.07:
             return (
@@ -811,8 +914,15 @@ class PerformanceMetricsStore:
         comments = max(0, safe_int(metric.get("comments"), 0))
         saves = max(0, safe_int(metric.get("saves"), 0))
         shares = max(0, safe_int(metric.get("shares"), 0))
+        average_watch_seconds = max(0.0, safe_float(metric.get("average_watch_seconds"), 0.0))
+        watched_full_rate = max(0.0, min(safe_float(metric.get("watched_full_rate"), 0.0), 1.0))
+        new_followers = max(0, safe_int(metric.get("new_followers"), 0))
+        total_play_time_seconds = max(0, safe_int(metric.get("total_play_time_seconds"), 0))
         like_rate = (likes / views) if views else 0.0
         engagement_rate = ((likes + comments + saves + shares) / views) if views else 0.0
+        follower_conversion_rate = (new_followers / views) if views else 0.0
+        duration = max(0.0, safe_float(metric.get("segment_end"), 0.0) - safe_float(metric.get("segment_start"), 0.0))
+        average_watch_rate = (average_watch_seconds / duration) if duration else 0.0
         return {
             "id": str(metric.get("id") or uuid.uuid4().hex[:12]),
             "clip_id": str(metric.get("clip_id") or ""),
@@ -827,6 +937,12 @@ class PerformanceMetricsStore:
             "shares": shares,
             "like_rate": like_rate,
             "engagement_rate": engagement_rate,
+            "average_watch_seconds": average_watch_seconds,
+            "watched_full_rate": watched_full_rate,
+            "new_followers": new_followers,
+            "total_play_time_seconds": total_play_time_seconds,
+            "follower_conversion_rate": follower_conversion_rate,
+            "average_watch_rate": average_watch_rate,
             "notes": str(metric.get("notes") or ""),
             "recorded_at": str(metric.get("recorded_at") or utc_now()),
             "metric_source": str(metric.get("metric_source") or "manual"),
@@ -1272,6 +1388,11 @@ class AutomationController:
         comments: int = 0,
         saves: int = 0,
         shares: int = 0,
+        average_watch_seconds: float = 0.0,
+        watched_full_rate: float = 0.0,
+        new_followers: int = 0,
+        total_play_time_seconds: int = 0,
+        metric_source: str = "manual",
         notes: str = "",
     ) -> dict[str, Any]:
         return self.metrics.record_metrics(
@@ -1281,6 +1402,11 @@ class AutomationController:
             comments=comments,
             saves=saves,
             shares=shares,
+            average_watch_seconds=average_watch_seconds,
+            watched_full_rate=watched_full_rate,
+            new_followers=new_followers,
+            total_play_time_seconds=total_play_time_seconds,
+            metric_source=metric_source,
             notes=notes,
         )
 

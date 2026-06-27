@@ -14,13 +14,14 @@ from urllib.request import Request, urlopen
 
 YOUTUBE_URL_PATTERN = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s<>()]+", re.IGNORECASE)
 TRUE_VALUES = {"1", "true", "yes", "on"}
-BOT_COMMANDS_VERSION = "2026-06-14.auto-metrics-v1"
+BOT_COMMANDS_VERSION = "2026-06-27.studio-metrics-v1"
 BOT_COMMANDS = [
     {"command": "start", "description": "Connect this chat and show help"},
     {"command": "status", "description": "Show automation and inbox counts"},
     {"command": "queue", "description": "Show queued YouTube links and progress"},
     {"command": "clips", "description": "Show recent clip labels for metrics"},
     {"command": "metrics", "description": "Record views likes comments saves shares"},
+    {"command": "studio", "description": "Record TikTok Studio watch metrics"},
     {"command": "syncmetrics", "description": "Auto-sync TikTok public video metrics"},
     {"command": "performance", "description": "Show recent TikTok performance"},
     {"command": "run", "description": "Start one automation run now"},
@@ -252,6 +253,9 @@ class TelegramBotService:
         if command == "/metrics":
             self._send_message(token, chat_id, self._record_metrics_text(text))
             return
+        if command == "/studio":
+            self._send_message(token, chat_id, self._record_studio_metrics_text(text))
+            return
         if command == "/run":
             self.automation.run_now()
             self._send_message(token, chat_id, "Automation run started now.")
@@ -303,6 +307,7 @@ class TelegramBotService:
             "/queue - source links and clip progress\n"
             "/clips - recent clip labels for metrics\n"
             "/metrics [clip] views likes comments saves shares - record TikTok results\n"
+            "/studio [clip] views=16.4k likes=689 saves=51 shares=6 avg=17.9s full=37.41 followers=17 play=83h38m36s\n"
             "/syncmetrics - pull public TikTok views/likes automatically\n"
             "/performance - recent views and like-rate summary\n"
             "/run - start a run now\n"
@@ -354,7 +359,7 @@ class TelegramBotService:
                 "Usage:\n"
                 "/metrics views likes [comments] [saves] [shares]\n"
                 "/metrics clip_08 views likes [comments] [saves] [shares]\n"
-                "Example: /metrics clip_08 1200 94 12 5 3"
+                "Example: /metrics clip_08 1200 94 12 5 3 avg=17.9s full=37.41 followers=17"
             )
 
         payload = parts[1:]
@@ -374,7 +379,7 @@ class TelegramBotService:
         except ValueError as exc:
             return str(exc)
 
-        notes = " ".join(payload[5:]).strip() if len(payload) > 5 else ""
+        options, notes = self._parse_metric_options(payload[5:]) if len(payload) > 5 else ({}, "")
         try:
             metric = self.automation.record_performance_metrics(
                 clip_ref=clip_ref,
@@ -383,6 +388,11 @@ class TelegramBotService:
                 comments=comments,
                 saves=saves,
                 shares=shares,
+                average_watch_seconds=float(options.get("average_watch_seconds") or 0.0),
+                watched_full_rate=float(options.get("watched_full_rate") or 0.0),
+                new_followers=int(options.get("new_followers") or 0),
+                total_play_time_seconds=int(options.get("total_play_time_seconds") or 0),
+                metric_source="tiktok_studio" if options else "manual",
                 notes=notes,
             )
         except Exception as exc:
@@ -395,7 +405,128 @@ class TelegramBotService:
             f"Views: {metric['views']}, likes: {metric['likes']}, comments: {metric['comments']}, "
             f"saves: {metric['saves']}, shares: {metric['shares']}.\n"
             f"Like rate: {like_rate:.1f}%, engagement: {engagement_rate:.1f}%."
+            + self._studio_saved_suffix(metric)
         )
+
+    def _record_studio_metrics_text(self, text: str) -> str:
+        parts = text.split()
+        if len(parts) < 2:
+            return (
+                "Usage:\n"
+                "/studio [clip] views=16.4k likes=689 comments=0 saves=51 shares=6 "
+                "avg=17.9s full=37.41 followers=17 play=83h38m36s"
+            )
+
+        payload = parts[1:]
+        clip_ref = "latest"
+        if payload and "=" not in payload[0]:
+            clip_ref = payload.pop(0)
+
+        try:
+            options, notes = self._parse_metric_options(payload)
+            views = self._required_metric_option(options, "views")
+            likes = self._required_metric_option(options, "likes")
+            comments = int(options.get("comments") or 0)
+            saves = int(options.get("saves") or 0)
+            shares = int(options.get("shares") or 0)
+        except ValueError as exc:
+            return str(exc)
+
+        try:
+            metric = self.automation.record_performance_metrics(
+                clip_ref=clip_ref,
+                views=views,
+                likes=likes,
+                comments=comments,
+                saves=saves,
+                shares=shares,
+                average_watch_seconds=float(options.get("average_watch_seconds") or 0.0),
+                watched_full_rate=float(options.get("watched_full_rate") or 0.0),
+                new_followers=int(options.get("new_followers") or 0),
+                total_play_time_seconds=int(options.get("total_play_time_seconds") or 0),
+                metric_source="tiktok_studio",
+                notes=notes,
+            )
+        except Exception as exc:
+            return f"Studio metrics were not saved: {exc}"
+
+        return (
+            f"Saved TikTok Studio metrics for {metric.get('clip_label') or metric.get('clip_id')}.\n"
+            f"Views: {metric['views']}, likes: {metric['likes']}, saves: {metric['saves']}, "
+            f"shares: {metric['shares']}, followers: {metric.get('new_followers', 0)}."
+            + self._studio_saved_suffix(metric)
+        )
+
+    def _parse_metric_options(self, tokens: list[str]) -> tuple[dict[str, Any], str]:
+        options: dict[str, Any] = {}
+        notes: list[str] = []
+        aliases = {
+            "v": "views",
+            "view": "views",
+            "views": "views",
+            "like": "likes",
+            "likes": "likes",
+            "comment": "comments",
+            "comments": "comments",
+            "save": "saves",
+            "saves": "saves",
+            "share": "shares",
+            "shares": "shares",
+            "avg": "average_watch_seconds",
+            "avg_watch": "average_watch_seconds",
+            "average_watch": "average_watch_seconds",
+            "watch": "average_watch_seconds",
+            "full": "watched_full_rate",
+            "full_watch": "watched_full_rate",
+            "watched_full": "watched_full_rate",
+            "followers": "new_followers",
+            "new_followers": "new_followers",
+            "follows": "new_followers",
+            "play": "total_play_time_seconds",
+            "playtime": "total_play_time_seconds",
+            "total_play": "total_play_time_seconds",
+        }
+        for token in tokens:
+            if "=" not in token:
+                notes.append(token)
+                continue
+            raw_key, raw_value = token.split("=", 1)
+            key = aliases.get(raw_key.strip().lower())
+            value = raw_value.strip()
+            if not key:
+                notes.append(token)
+                continue
+            if key in {"views", "likes", "comments", "saves", "shares", "new_followers"}:
+                options[key] = self._parse_count(value)
+            elif key == "average_watch_seconds":
+                options[key] = self._parse_seconds(value)
+            elif key == "watched_full_rate":
+                options[key] = self._parse_rate(value)
+            elif key == "total_play_time_seconds":
+                options[key] = int(round(self._parse_seconds(value)))
+        return options, " ".join(notes).strip()
+
+    def _required_metric_option(self, options: dict[str, Any], key: str) -> int:
+        value = options.get(key)
+        if value is None:
+            raise ValueError(f"Missing {key}= value.")
+        return int(value)
+
+    def _studio_saved_suffix(self, metric: dict[str, Any]) -> str:
+        parts: list[str] = []
+        avg_watch = float(metric.get("average_watch_seconds") or 0.0)
+        full_rate = float(metric.get("watched_full_rate") or 0.0)
+        followers = int(metric.get("new_followers") or 0)
+        play_time = int(metric.get("total_play_time_seconds") or 0)
+        if avg_watch:
+            parts.append(f"avg watch {avg_watch:.1f}s")
+        if full_rate:
+            parts.append(f"full watched {full_rate * 100:.1f}%")
+        if followers:
+            parts.append(f"+{followers} followers")
+        if play_time:
+            parts.append(f"play time {self._format_duration(play_time)}")
+        return ("\nStudio: " + ", ".join(parts) + ".") if parts else ""
 
     def _looks_like_int(self, value: str) -> bool:
         try:
@@ -420,6 +551,51 @@ class TelegramBotService:
         if number < 0:
             raise ValueError("Metrics cannot be negative.")
         return int(round(number * multiplier))
+
+    def _parse_seconds(self, value: str) -> float:
+        raw = value.strip().lower().replace(",", ".")
+        if not raw:
+            raise ValueError("Empty time value.")
+        if ":" in raw:
+            parts = [float(part) for part in raw.split(":")]
+            if len(parts) == 3:
+                return parts[0] * 3600 + parts[1] * 60 + parts[2]
+            if len(parts) == 2:
+                return parts[0] * 60 + parts[1]
+        match = re.fullmatch(
+            r"(?:(?P<hours>\d+(?:\.\d+)?)h)?(?:(?P<minutes>\d+(?:\.\d+)?)m)?(?:(?P<seconds>\d+(?:\.\d+)?)s?)?",
+            raw,
+        )
+        if match and any(match.group(name) for name in ("hours", "minutes", "seconds")):
+            return (
+                float(match.group("hours") or 0) * 3600
+                + float(match.group("minutes") or 0) * 60
+                + float(match.group("seconds") or 0)
+            )
+        return float(raw.rstrip("s"))
+
+    def _parse_rate(self, value: str) -> float:
+        raw = value.strip().replace(",", ".")
+        had_percent = raw.endswith("%")
+        if had_percent:
+            raw = raw[:-1]
+        number = float(raw)
+        if number < 0:
+            raise ValueError("Rate cannot be negative.")
+        if had_percent or number > 1:
+            number /= 100
+        return min(number, 1.0)
+
+    @staticmethod
+    def _format_duration(seconds: int | float) -> str:
+        total = max(0, int(round(float(seconds))))
+        hours, remainder = divmod(total, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return f"{hours}h{minutes:02d}m{seconds:02d}s"
+        if minutes:
+            return f"{minutes}m{seconds:02d}s"
+        return f"{seconds}s"
 
     def _extract_caption_copy_payload(self, message: str) -> tuple[str, str]:
         marker = "Caption to paste in TikTok:\n"
