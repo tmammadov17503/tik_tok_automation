@@ -27,6 +27,10 @@ DEFAULT_TIKTOK_MAX_PENDING_SHARES = 5
 DEFAULT_UPLOAD_MAX_ATTEMPTS = 4
 DEFAULT_AUTOMATION_INTERVAL_HOURS = 8
 DEFAULT_TIKTOK_PUBLIC_USERNAME = "film.box.official"
+SOURCE_QUALITY_MIN_POSTED = 6
+SOURCE_QUALITY_MIN_AVG_VIEWS = 150
+SOURCE_QUALITY_MIN_TOP_VIEWS = 300
+SOURCE_QUALITY_MIN_FOLLOWERS = 1
 CANONICAL_TIKTOK_HASHTAGS = [
     "#fyp",
     "#\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438",
@@ -1196,6 +1200,46 @@ class AutomationController:
             + str(item.get("segment_start") or "")
         )
 
+        high_retention_hooks = [
+            "Этот диалог надо досмотреть до конца 👀",
+            "Сцена держит до последней секунды 🫢",
+            "Дальше начинается самое интересное 😳",
+            "Тот самый диалог, где всё пошло не так 👀",
+            "Досмотри, там самый сок 👀",
+        ]
+        if not excerpt_key:
+            return self._stable_choice(high_retention_hooks, label_seed)
+
+        priority_keyword_hooks = [
+            (
+                ("почему", "зачем", "как ", "?"),
+                [
+                    "Этот диалог надо досмотреть до конца 👀",
+                    "Вопрос, после которого всё меняется 😳",
+                    "Ответ будет совсем не таким, как кажется 🫢",
+                ],
+            ),
+            (
+                ("стой", "тихо", "подожди", "стоп"),
+                [
+                    "С этого момента сцена резко меняется 👀",
+                    "Вот тут становится по-настоящему напряжённо 😳",
+                    "Дальше начинается самое интересное 🫢",
+                ],
+            ),
+            (
+                ("деньги", "власть", "работ", "план"),
+                [
+                    "Обычный разговор внезапно стал серьёзным 👀",
+                    "Этот момент звучит слишком жизненно 😳",
+                    "Вот здесь уже пахнет проблемами 🫢",
+                ],
+            ),
+        ]
+        for tokens, hooks in priority_keyword_hooks:
+            if any(token in excerpt_key for token in tokens):
+                return self._stable_choice(hooks, label_seed + excerpt_key)
+
         keyword_hooks = [
             (
                 ("почему", "зачем", "как ", "?", "why", "how"),
@@ -1887,6 +1931,65 @@ class AutomationController:
             ),
         )
 
+    def _source_quality_snapshot(self, source_entry: dict[str, Any]) -> dict[str, Any]:
+        source_id = str(source_entry.get("id") or "")
+        source_url = str(source_entry.get("source_url") or "")
+        metrics = [
+            metric
+            for metric in self.metrics.latest_metrics_by_clip()
+            if str(metric.get("source_id") or "") == source_id
+            or (source_url and str(metric.get("source_url") or "") == source_url)
+        ]
+        views = [safe_int(metric.get("views"), 0) for metric in metrics]
+        total_views = sum(views)
+        return {
+            "clips": len(metrics),
+            "views": total_views,
+            "avg_views": (total_views / len(metrics)) if metrics else 0.0,
+            "top_views": max(views) if views else 0,
+            "likes": sum(safe_int(metric.get("likes"), 0) for metric in metrics),
+            "saves": sum(safe_int(metric.get("saves"), 0) for metric in metrics),
+            "shares": sum(safe_int(metric.get("shares"), 0) for metric in metrics),
+            "followers": sum(safe_int(metric.get("new_followers"), 0) for metric in metrics),
+        }
+
+    def _maybe_retire_weak_source(self, source_entry: dict[str, Any]) -> bool:
+        source_id = str(source_entry.get("id") or "")
+        if not source_id:
+            return False
+
+        items = self.post_queue.items_for_source(source_id)
+        generating_left = any(item.get("status") in {"pending", "uploading", "processing"} for item in items)
+        if generating_left:
+            return False
+
+        posted = int(source_entry.get("posted_clips") or 0)
+        snapshot = self._source_quality_snapshot(source_entry)
+        clips_with_metrics = max(posted, int(snapshot.get("clips") or 0))
+        if clips_with_metrics < SOURCE_QUALITY_MIN_POSTED:
+            return False
+
+        if (
+            float(snapshot.get("avg_views") or 0.0) >= SOURCE_QUALITY_MIN_AVG_VIEWS
+            or int(snapshot.get("top_views") or 0) >= SOURCE_QUALITY_MIN_TOP_VIEWS
+            or int(snapshot.get("followers") or 0) >= SOURCE_QUALITY_MIN_FOLLOWERS
+            or int(snapshot.get("saves") or 0) > 0
+            or int(snapshot.get("shares") or 0) > 0
+        ):
+            return False
+
+        label = source_entry.get("title") or source_entry.get("source_url") or "source"
+        self.sources.remove_source(source_id)
+        shutil.rmtree(self._source_cache_dir(source_id), ignore_errors=True)
+        message = (
+            f"Stopped weak source after {clips_with_metrics} clip(s): "
+            f"{compact_number(snapshot.get('avg_views') or 0)} average views, "
+            f"top {compact_number(snapshot.get('top_views') or 0)}. Advancing to the next queued source."
+        )
+        self.append_log(f"{label}: {message}")
+        self.notify(message)
+        return True
+
     def _source_is_finished(self, source_entry: dict[str, Any]) -> bool:
         source_id = str(source_entry.get("id") or "")
         planned = int(source_entry.get("planned_clips") or 0)
@@ -1901,6 +2004,8 @@ class AutomationController:
         for source_entry in self._ordered_sources():
             if self._source_is_finished(source_entry):
                 self._maybe_finalize_source(str(source_entry.get("id") or ""))
+                continue
+            if self._maybe_retire_weak_source(source_entry):
                 continue
             return source_entry
         return None
@@ -2064,8 +2169,14 @@ class AutomationController:
         self.post_queue.delete_asset_for_item(item_id)
 
         if source_id:
-            self.sources.increment_posted(source_id, 1)
-            self._maybe_finalize_source(source_id)
+            try:
+                self.sources.increment_posted(source_id, 1)
+            except Exception:
+                self.append_log(
+                    f"{item.get('clip_label')} was posted after its source was already retired from the queue."
+                )
+            else:
+                self._maybe_finalize_source(source_id)
 
         self.append_log(f"{item.get('clip_label')} completed on TikTok and was removed from local queued storage.")
         if notify:
