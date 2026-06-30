@@ -14,11 +14,13 @@ from urllib.request import Request, urlopen
 
 YOUTUBE_URL_PATTERN = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s<>()]+", re.IGNORECASE)
 TRUE_VALUES = {"1", "true", "yes", "on"}
-BOT_COMMANDS_VERSION = "2026-06-27.studio-metrics-v1"
+BOT_COMMANDS_VERSION = "2026-06-30.monetization-mode-v1"
 BOT_COMMANDS = [
     {"command": "start", "description": "Connect this chat and show help"},
     {"command": "status", "description": "Show automation and inbox counts"},
     {"command": "queue", "description": "Show queued YouTube links and progress"},
+    {"command": "money", "description": "Queue 60s+ monetization test videos"},
+    {"command": "growth", "description": "Queue normal 30s growth videos"},
     {"command": "clips", "description": "Show recent clip labels for metrics"},
     {"command": "metrics", "description": "Record views likes comments saves shares"},
     {"command": "studio", "description": "Record TikTok Studio watch metrics"},
@@ -31,6 +33,18 @@ BOT_COMMANDS = [
     {"command": "help", "description": "Show available commands"},
 ]
 DEFAULT_AUTOMATION_INTERVAL_HOURS = 8
+MODE_DEFAULT_CLIPS = {"growth": 8, "monetization": 4}
+
+
+def normalize_content_mode(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if text in {"money", "monetize", "monetisation", "monetization", "creator_rewards", "long"}:
+        return "monetization"
+    return "growth"
+
+
+def mode_label(value: Any) -> str:
+    return "Monetization" if normalize_content_mode(value) == "monetization" else "Growth"
 
 
 def utc_now() -> str:
@@ -128,6 +142,7 @@ class TelegramBotService:
             "last_error": str(config.get("last_error") or ""),
             "last_update_at": str(config.get("last_update_at") or ""),
             "commands_installed": bool(config.get("commands_installed")),
+            "commands_version": str(config.get("commands_version") or ""),
         }
 
     def notify(self, message: str) -> None:
@@ -279,14 +294,39 @@ class TelegramBotService:
             result = self.automation.mark_oldest_inbox_posted()
             self._send_message(token, chat_id, str(result.get("message") or "No update."))
             return
+        if command in {"/money", "/monetization", "/monetize"}:
+            urls = [url.rstrip(".,;") for url in YOUTUBE_URL_PATTERN.findall(text)]
+            if not urls:
+                self._send_message(token, chat_id, "Usage: /money https://youtu.be/...  This queues 4 longer 60s+ monetization test videos.")
+                return
+            self._queue_source_urls(token, chat_id, urls, "monetization")
+            return
+        if command in {"/growth", "/shorts"}:
+            urls = [url.rstrip(".,;") for url in YOUTUBE_URL_PATTERN.findall(text)]
+            if not urls:
+                self._send_message(token, chat_id, "Usage: /growth https://youtu.be/...  This queues 8 normal 30s growth videos.")
+                return
+            self._queue_source_urls(token, chat_id, urls, "growth")
+            return
 
         urls = [url.rstrip(".,;") for url in YOUTUBE_URL_PATTERN.findall(text)]
         if not urls:
             self._send_message(token, chat_id, "Send me a YouTube link, or use /status and /queue.")
             return
 
+        self._queue_source_urls(token, chat_id, urls, "growth")
+
+    def _queue_source_urls(self, token: str, chat_id: str, urls: list[str], content_mode: str) -> None:
+        normalized_mode = normalize_content_mode(content_mode)
+        planned_clips = MODE_DEFAULT_CLIPS[normalized_mode]
         for url in urls:
-            self.sources.add_source({"source_url": url, "planned_clips": 8})
+            self.sources.add_source(
+                {
+                    "source_url": url,
+                    "planned_clips": planned_clips,
+                    "content_mode": normalized_mode,
+                }
+            )
 
         self.automation.update_settings(
             {"enabled": True, "interval_hours": DEFAULT_AUTOMATION_INTERVAL_HOURS, "next_run_at": utc_now()}
@@ -294,17 +334,27 @@ class TelegramBotService:
         self.automation.run_now()
         count = len(urls)
         suffix = "" if count == 1 else "s"
+        mode = mode_label(normalized_mode)
+        format_note = (
+            "4 longer 60s+ monetization-test videos"
+            if normalized_mode == "monetization"
+            else "8 short 30s growth videos"
+        )
         self._send_message(
             token,
             chat_id,
-            f"Queued {count} YouTube link{suffix}. Each link is set to 8 videos. I started the first run now; after that it runs every {DEFAULT_AUTOMATION_INTERVAL_HOURS} hours.",
+            f"Queued {count} YouTube link{suffix} in {mode} mode. Each link is set to {format_note}. "
+            f"I started the first run now; after that it runs every {DEFAULT_AUTOMATION_INTERVAL_HOURS} hours.",
         )
 
     def _help_text(self) -> str:
         return (
-            "Send a YouTube link and I will queue 8 short videos from it.\n\n"
+            "Send a YouTube link and I will queue 8 short growth videos from it.\n"
+            "Use /money <YouTube link> for 4 longer 60s+ monetization test videos.\n\n"
             "/status - current automation counts\n"
             "/queue - source links and clip progress\n"
+            "/money <link> - queue 60s+ monetization test videos\n"
+            "/growth <link> - queue normal 30s growth videos\n"
             "/clips - recent clip labels for metrics\n"
             "/metrics [clip] views likes comments saves shares - record TikTok results\n"
             "/studio [clip] views=16.4k likes=689 saves=51 shares=6 avg=17.9s full=37.41 followers=17 play=83h38m36s\n"
@@ -325,6 +375,7 @@ class TelegramBotService:
             f"Running now: {'yes' if status.get('running') else 'no'}",
             f"Next run: {status.get('next_run_at') or 'not scheduled'}",
             f"Queue: {counts.get('pending', 0)} pending, {counts.get('making', 0)} making/queued, {counts.get('inbox', 0)} in inbox, {counts.get('posted', 0)} posted, {counts.get('failed', 0)} failed",
+            f"Monetization mode: {counts.get('monetization_inbox', 0)} in inbox, {counts.get('monetization_posted', 0)} posted",
             f"TikTok inbox API usage: {status.get('tiktok_remote_pending', 0)}/{status.get('tiktok_pending_cap', 0)}",
             str(status.get("performance_summary") or ""),
         ]
@@ -598,11 +649,13 @@ class TelegramBotService:
         return f"{seconds}s"
 
     def _extract_caption_copy_payload(self, message: str) -> tuple[str, str]:
-        marker = "Caption to paste in TikTok:\n"
+        marker = "Caption to paste in TikTok"
         if marker not in message:
             return message, ""
 
         before, after = message.split(marker, 1)
+        if "\n" in after:
+            after = after.split("\n", 1)[1]
         caption, separator, _footer = after.partition("\nTikTok inbox uploads")
         caption = caption.strip()
         main_message = before.rstrip()

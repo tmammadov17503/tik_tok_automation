@@ -90,6 +90,12 @@ TikTok limits pending inbox shares, so the worker now pauses uploads when the re
 
 Source subtitles are used first because they are free and already timestamped. If a source has no subtitles and `OPENAI_API_KEY` is set, the worker extracts audio from each rendered clip and uses the OpenAI transcription API to create captions. Local Whisper remains optional for powerful local machines, but it is not installed by default on small servers.
 
+Telegram source modes:
+
+- Paste a YouTube link normally to queue 8 short 30-second growth clips.
+- Send `/growth <YouTube link>` to explicitly queue the normal growth format.
+- Send `/money <YouTube link>` to queue 4 longer 60s+ monetization test videos with separate labels and captions.
+
 ## Optional TikTok MongoDB Analytics
 
 MongoDB analytics are intentionally separate from the trading bot project. The TikTok sync reads only this app's local JSON state and writes to TikTok-only collections:

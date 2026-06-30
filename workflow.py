@@ -996,6 +996,7 @@ class WorkflowPipeline:
             "source_cache_dir": str(payload.get("source_cache_dir") or "").strip(),
             "source_queue_id": str(payload.get("source_queue_id") or "").strip(),
             "source_original_url": str(payload.get("source_original_url") or "").strip(),
+            "content_mode": str(payload.get("content_mode") or "growth").strip().lower(),
             "excluded_segments": normalize_excluded_segments(payload.get("excluded_segments")),
             "hashtags": [
                 str(tag).strip()
@@ -2011,6 +2012,7 @@ class WorkflowPipeline:
         payload = {
             "topic": topic,
             "source_title": source_title,
+            "content_mode": request.get("content_mode") or "growth",
             "publish_mode": request["publish_mode"],
             "captions": captions,
             "hashtags": hashtags,

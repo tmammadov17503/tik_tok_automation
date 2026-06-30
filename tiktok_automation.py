@@ -31,6 +31,32 @@ SOURCE_QUALITY_MIN_POSTED = 6
 SOURCE_QUALITY_MIN_AVG_VIEWS = 150
 SOURCE_QUALITY_MIN_TOP_VIEWS = 300
 SOURCE_QUALITY_MIN_FOLLOWERS = 1
+CONTENT_MODE_GROWTH = "growth"
+CONTENT_MODE_MONETIZATION = "monetization"
+CONTENT_MODE_ALIASES = {
+    "money": CONTENT_MODE_MONETIZATION,
+    "monetize": CONTENT_MODE_MONETIZATION,
+    "monetisation": CONTENT_MODE_MONETIZATION,
+    "monetization": CONTENT_MODE_MONETIZATION,
+    "creator_rewards": CONTENT_MODE_MONETIZATION,
+    "long": CONTENT_MODE_MONETIZATION,
+    "growth": CONTENT_MODE_GROWTH,
+    "short": CONTENT_MODE_GROWTH,
+}
+MODE_PROFILES = {
+    CONTENT_MODE_GROWTH: {
+        "label": "Growth",
+        "clip_prefix": "clip",
+        "clip_duration_sec": 30,
+        "default_planned_clips": 8,
+    },
+    CONTENT_MODE_MONETIZATION: {
+        "label": "Monetization",
+        "clip_prefix": "money",
+        "clip_duration_sec": 72,
+        "default_planned_clips": 4,
+    },
+}
 CANONICAL_TIKTOK_HASHTAGS = [
     "#fyp",
     "#\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438",
@@ -98,6 +124,23 @@ def compact_number(value: int | float) -> str:
             text = f"{compact:.1f}".rstrip("0").rstrip(".")
             return f"{text}{suffix}"
     return str(int(number))
+
+
+def normalize_content_mode(value: Any) -> str:
+    key = str(value or "").strip().lower().replace("-", "_")
+    return CONTENT_MODE_ALIASES.get(key, CONTENT_MODE_GROWTH)
+
+
+def content_mode_profile(value: Any) -> dict[str, Any]:
+    return MODE_PROFILES[normalize_content_mode(value)]
+
+
+def content_mode_label(value: Any) -> str:
+    return str(content_mode_profile(value).get("label") or "Growth")
+
+
+def clip_label_prefix(value: Any) -> str:
+    return str(content_mode_profile(value).get("clip_prefix") or "clip")
 NON_RETRYABLE_ERROR_HINTS = (
     "scope_not_authorized",
     "access_token_invalid",
@@ -279,8 +322,9 @@ class PostQueueManager:
                 if start_index is not None:
                     sequence = max(1, start_index + offset)
                     suffix = clip_path.suffix.lower() or ".mp4"
-                    original_name = f"clip_{sequence:02d}_vertical_captioned{suffix}"
-                    clip_label = f"clip_{sequence:02d}_vertical_captioned"
+                    prefix = clip_label_prefix(source_entry.get("content_mode"))
+                    original_name = f"{prefix}_{sequence:02d}_vertical_captioned{suffix}"
+                    clip_label = f"{prefix}_{sequence:02d}_vertical_captioned"
 
                 key = (str(source_entry.get("id") or ""), original_name)
                 if key in existing_keys:
@@ -290,6 +334,7 @@ class PostQueueManager:
                 stored_path = self.asset_root / f"{item_id}{clip_path.suffix.lower() or '.mp4'}"
                 shutil.copy2(clip_path, stored_path)
                 now = utc_now()
+                content_mode = normalize_content_mode(source_entry.get("content_mode"))
                 items.append(
                     self._normalize_item(
                         {
@@ -297,6 +342,7 @@ class PostQueueManager:
                             "source_id": source_entry.get("id"),
                             "source_url": source_entry.get("source_url"),
                             "source_title": source_entry.get("title") or "Saved source",
+                            "content_mode": content_mode,
                             "clip_label": clip_label,
                             "clip_path": str(stored_path),
                             "original_name": original_name,
@@ -388,11 +434,14 @@ class PostQueueManager:
 
     def _normalize_item(self, item: dict[str, Any]) -> dict[str, Any]:
         hashtags = normalize_tiktok_hashtags(item.get("hashtags") or self.default_hashtags)
+        content_mode = normalize_content_mode(item.get("content_mode"))
         return {
             "id": str(item.get("id") or uuid.uuid4().hex[:12]),
             "source_id": str(item.get("source_id") or ""),
             "source_url": str(item.get("source_url") or ""),
             "source_title": str(item.get("source_title") or "Saved source"),
+            "content_mode": content_mode,
+            "mode_label": content_mode_label(content_mode),
             "clip_label": str(item.get("clip_label") or "Queued clip"),
             "clip_path": str(item.get("clip_path") or ""),
             "original_name": str(item.get("original_name") or ""),
@@ -481,6 +530,7 @@ class PerformanceMetricsStore:
                 "source_id": clip.get("source_id") or "",
                 "source_url": clip.get("source_url") or "",
                 "source_title": clip.get("source_title") or "",
+                "content_mode": clip.get("content_mode") or CONTENT_MODE_GROWTH,
                 "views": max(0, int(views)),
                 "likes": max(0, int(likes)),
                 "comments": max(0, int(comments)),
@@ -566,6 +616,7 @@ class PerformanceMetricsStore:
                     "source_id": clip.get("source_id") or "",
                     "source_url": clip.get("source_url") or "",
                     "source_title": clip.get("source_title") or "",
+                    "content_mode": clip.get("content_mode") or CONTENT_MODE_GROWTH,
                     "views": views,
                     "likes": likes,
                     "comments": comments,
@@ -632,7 +683,7 @@ class PerformanceMetricsStore:
             when = item.get("posted_at") or item.get("inbox_delivered_at") or item.get("updated_at") or ""
             status = item.get("status") or ""
             label = item.get("clip_label") or item.get("id") or "clip"
-            lines.append(f"- {label} ({status}, {when})")
+            lines.append(f"- {label} [{content_mode_label(item.get('content_mode'))}] ({status}, {when})")
         return lines
 
     def summary_line(self, limit: int = 10) -> str:
@@ -683,8 +734,9 @@ class PerformanceMetricsStore:
             like_rate = float(metric.get("like_rate") or 0.0) * 100
             multiplier = views_count / median_views if median_views else 0.0
             label = metric.get("clip_label") or metric.get("clip_id") or "clip"
+            mode_label = content_mode_label(metric.get("content_mode"))
             lines.append(
-                f"{index}. {label}: {compact_number(views_count)} views, "
+                f"{index}. {label} [{mode_label}]: {compact_number(views_count)} views, "
                 f"{compact_number(likes)} likes, {like_rate:.1f}% like rate"
                 + (f", {multiplier:.1f}x median" if multiplier >= 2 else "")
             )
@@ -702,7 +754,8 @@ class PerformanceMetricsStore:
             lines.extend(["", "Best sources"])
             for row in source_rows[:5]:
                 lines.append(
-                    f"- {self._short_source(row['source_url'])}: {row['clips']} clips, "
+                    f"- {self._short_source(row['source_url'])} [{content_mode_label(row['content_mode'])}]: "
+                    f"{row['clips']} clips, "
                     f"{compact_number(row['views'])} views total, "
                     f"{compact_number(row['avg_views'])} avg, {row['like_rate'] * 100:.1f}% like rate"
                     + (f", +{compact_number(row['new_followers'])} followers" if row["new_followers"] else "")
@@ -718,11 +771,14 @@ class PerformanceMetricsStore:
         rows: dict[str, dict[str, Any]] = {}
         for metric in self.latest_metrics_by_clip():
             source_url = str(metric.get("source_url") or metric.get("source_id") or "unknown")
+            content_mode = normalize_content_mode(metric.get("content_mode"))
+            row_key = f"{content_mode}:{source_url}"
             row = rows.setdefault(
-                source_url,
+                row_key,
                 {
                     "source_url": source_url,
                     "source_title": str(metric.get("source_title") or ""),
+                    "content_mode": content_mode,
                     "clips": 0,
                     "views": 0,
                     "likes": 0,
@@ -934,6 +990,7 @@ class PerformanceMetricsStore:
             "source_id": str(metric.get("source_id") or ""),
             "source_url": str(metric.get("source_url") or ""),
             "source_title": str(metric.get("source_title") or ""),
+            "content_mode": normalize_content_mode(metric.get("content_mode")),
             "views": views,
             "likes": likes,
             "comments": comments,
@@ -1187,9 +1244,48 @@ class AutomationController:
 
     def _caption_hint_for_item(self, item: dict[str, Any]) -> str:
         hashtags = normalize_tiktok_hashtags(item.get("hashtags") or self.post_queue.default_hashtags)
-        hook = self._caption_hook_for_item(item)
+        hook = (
+            self._monetization_caption_hook_for_item(item)
+            if normalize_content_mode(item.get("content_mode")) == CONTENT_MODE_MONETIZATION
+            else self._caption_hook_for_item(item)
+        )
         tag_line = f"{' '.join(hashtags)} {CAPTION_EMOJI}".strip()
         return f"{hook}\n{tag_line}".strip() if hook else tag_line
+
+    def _monetization_caption_hook_for_item(self, item: dict[str, Any]) -> str:
+        excerpt = repair_mojibake(str(item.get("segment_excerpt") or "")).strip()
+        excerpt_key = excerpt.casefold()
+        label_seed = (
+            str(item.get("source_id") or "")
+            + str(item.get("clip_label") or "")
+            + str(item.get("segment_start") or "")
+        )
+        hooks = [
+            "Разбор сцены: почему этот момент так цепляет? Досмотри до конца 👀",
+            "Сцена выглядит простой, но смысл раскрывается ближе к концу 🫢",
+            "Вот почему этот диалог хочется пересмотреть еще раз 👀",
+            "Момент, где обычный разговор внезапно становится серьезным 😳",
+            "Эта сцена работает именно из-за финальной реплики 👀",
+        ]
+        if any(token in excerpt_key for token in ("почему", "зачем", "как ", "?")):
+            hooks = [
+                "Разбор сцены: вопрос звучит просто, но ответ меняет всё 👀",
+                "Вот почему этот вопрос цепляет сильнее, чем кажется 😳",
+                "Сцена строится на одном вопросе, и он решает всё 🫢",
+            ]
+        elif any(token in excerpt_key for token in ("деньги", "власть", "работ", "план")):
+            hooks = [
+                "Разбор сцены: обычный план быстро превращается в проблему 👀",
+                "Вот где разговор про планы становится слишком жизненным 😳",
+                "Сцена цепляет тем, как спокойно начинается конфликт 👀",
+            ]
+        elif any(token in excerpt_key for token in ("люб", "сердц", "чувств")):
+            hooks = [
+                "Разбор сцены: тут эмоции сказали больше, чем слова 🫢",
+                "Вот почему этот момент попадает прямо в чувства 😳",
+                "Сцена держится на эмоциях, которые сложно скрыть 👀",
+            ]
+        return self._stable_choice(hooks, label_seed + excerpt_key)
 
     def _caption_hook_for_item(self, item: dict[str, Any]) -> str:
         excerpt = repair_mojibake(str(item.get("segment_excerpt") or "")).strip()
@@ -1301,8 +1397,9 @@ class AutomationController:
 
     def _caption_paste_message(self, item: dict[str, Any]) -> str:
         caption = self._caption_hint_for_item(item)
+        mode_label = content_mode_label(item.get("content_mode"))
         return (
-            "Caption to paste in TikTok:\n"
+            f"Caption to paste in TikTok ({mode_label}):\n"
             f"{caption}\n"
             "TikTok inbox uploads do not prefill captions, so paste this before publishing."
         )
@@ -1350,6 +1447,18 @@ class AutomationController:
                 "inbox": sum(1 for item in queue_items if item.get("status") == "sent_to_inbox"),
                 "posted": sum(1 for item in queue_items if item.get("status") == "posted"),
                 "failed": sum(1 for item in queue_items if item.get("status") == "failed"),
+                "monetization_inbox": sum(
+                    1
+                    for item in queue_items
+                    if item.get("status") == "sent_to_inbox"
+                    and normalize_content_mode(item.get("content_mode")) == CONTENT_MODE_MONETIZATION
+                ),
+                "monetization_posted": sum(
+                    1
+                    for item in queue_items
+                    if item.get("status") == "posted"
+                    and normalize_content_mode(item.get("content_mode")) == CONTENT_MODE_MONETIZATION
+                ),
             },
             "performance_summary": self.metrics.summary_line(),
             "auto_metrics": {
@@ -1397,8 +1506,9 @@ class AutomationController:
             return "Source complete."
         planned = progress["planned"]
         ready = progress["ready"]
+        mode_label = content_mode_label(source_entry.get("content_mode"))
         return (
-            f"{ready}/{planned} ready, {progress['inbox']} in TikTok inbox, "
+            f"{mode_label}: {ready}/{planned} ready, {progress['inbox']} in TikTok inbox, "
             f"{progress['queued'] + progress['making']} making/queued, {progress['remaining']} left."
         )
 
@@ -1527,11 +1637,12 @@ class AutomationController:
             segments=segments,
         )
         caption_note = "with subtitles" if captioned else "without subtitles"
+        mode_label = content_mode_label(source_entry.get("content_mode"))
         self.append_log(
-            f"Queued {len(clip_paths)} clip(s) from {source_entry.get('title') or source_url} for TikTok upload."
+            f"Queued {len(clip_paths)} {mode_label.lower()} clip(s) from {source_entry.get('title') or source_url} for TikTok upload."
         )
         self.notify(
-            f"Created {len(clip_paths)} video(s) {caption_note} from {source_entry.get('title') or source_url}. "
+            f"Created {len(clip_paths)} {mode_label.lower()} video(s) {caption_note} from {source_entry.get('title') or source_url}. "
             f"{self.source_progress_line(str(source_entry.get('id') or ''))}"
         )
 
@@ -2027,6 +2138,17 @@ class AutomationController:
         cached_source = self._cached_source_path(source_id)
         source_url = str(source_entry.get("source_url") or "")
         excluded_segments = self._used_segments_for_source(source_id)
+        content_mode = normalize_content_mode(source_entry.get("content_mode"))
+        profile = content_mode_profile(content_mode)
+        clip_duration_sec = int(source_entry.get("clip_duration_sec") or profile["clip_duration_sec"])
+        clip_duration_sec = max(60, min(90, clip_duration_sec)) if content_mode == CONTENT_MODE_MONETIZATION else max(10, min(60, clip_duration_sec))
+        caption_hint = self._caption_hint_for_item(
+            {
+                "source_id": source_id,
+                "content_mode": content_mode,
+                "hashtags": self.post_queue.default_hashtags,
+            }
+        )
         request = {
             "project_name": source_entry.get("title") or "Queued Source",
             "topic": source_entry.get("title") or "Queued source clip",
@@ -2037,7 +2159,7 @@ class AutomationController:
             "source_cache_dir": str(cache_dir),
             "excluded_segments": excluded_segments,
             "segments": "",
-            "clip_duration_sec": 30,
+            "clip_duration_sec": clip_duration_sec,
             "clips_count": 1,
             "selection_offset": 0 if excluded_segments else posted + pending_count,
             "frame_rate": "source",
@@ -2047,11 +2169,13 @@ class AutomationController:
             "publish_mode": "tiktok_api",
             "rights_confirmed": True,
             "hashtags": list(self.post_queue.default_hashtags),
-            "caption_hint": self._caption_hint_for_item({"hashtags": self.post_queue.default_hashtags}),
+            "caption_hint": caption_hint,
+            "content_mode": content_mode,
         }
         job = AutomationJobProxy(self, source_entry)
         self.notify(
-            f"Generating video clips from {source_entry.get('title') or source_entry.get('source_url')}. "
+            f"Generating {profile['label'].lower()} video from {source_entry.get('title') or source_entry.get('source_url')} "
+            f"({clip_duration_sec}s). "
             f"{self.source_progress_line(source_id)}"
         )
         result = self.pipeline.run(job, request)

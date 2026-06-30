@@ -172,6 +172,8 @@ function automationItemStatusLabel(status) {
 function applySourceToRun(entry) {
   form.elements.source_mode.value = "remote_url";
   form.elements.source_value.value = entry.source_url;
+  form.elements.clip_duration_sec.value = entry.content_mode === "monetization" ? "72" : "30";
+  form.elements.clips_count.value = entry.content_mode === "monetization" ? "1" : "2";
   if (!form.elements.topic.value.trim() && entry.title) {
     form.elements.topic.value = entry.title;
   }
@@ -201,7 +203,7 @@ function renderSources(sources) {
 
     const meta = document.createElement("p");
     meta.className = "source-meta";
-    meta.textContent = `Planned ${entry.planned_clips} clip${entry.planned_clips === 1 ? "" : "s"}`;
+    meta.textContent = `${entry.mode_label || "Growth"} mode · planned ${entry.planned_clips} clip${entry.planned_clips === 1 ? "" : "s"}`;
 
     heading.appendChild(title);
     heading.appendChild(meta);
@@ -503,6 +505,7 @@ async function saveSource(event) {
   const payload = {
     source_url: sourceForm.elements.source_url.value,
     planned_clips: Number(sourceForm.elements.planned_clips.value || 8),
+    content_mode: sourceForm.elements.content_mode.value || "growth",
     title: sourceForm.elements.title.value,
   };
 
@@ -523,6 +526,7 @@ async function saveSource(event) {
 
   sourceForm.reset();
   sourceForm.elements.planned_clips.value = "8";
+  sourceForm.elements.content_mode.value = "growth";
   renderSources(data.sources || []);
 }
 
@@ -869,6 +873,10 @@ tiktokDisconnectButton.addEventListener("click", disconnectTikTok);
 runtimeForm.addEventListener("submit", saveRuntimeSettings);
 telegramForm.addEventListener("submit", saveTelegramSettings);
 sourceForm.addEventListener("submit", saveSource);
+sourceForm.elements.content_mode.addEventListener("change", () => {
+  sourceForm.elements.planned_clips.value =
+    sourceForm.elements.content_mode.value === "monetization" ? "4" : "8";
+});
 automationForm.addEventListener("submit", saveAutomationSettings);
 automationRunButton.addEventListener("click", runAutomationNow);
 loadStatus().catch((error) => {

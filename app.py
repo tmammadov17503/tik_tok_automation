@@ -279,6 +279,8 @@ class JobRegistry:
 
 
 class SourceQueueManager:
+    VALID_CONTENT_MODES = {"growth", "monetization"}
+
     def __init__(self, root: Path) -> None:
         self.root = root
         self.secrets_root = root / ".secrets"
@@ -300,17 +302,28 @@ class SourceQueueManager:
         if not source_url:
             raise ValueError("Please enter a source URL.")
 
-        planned_clips = max(1, min(int(payload.get("planned_clips") or 8), 20))
+        content_mode = self._normalize_content_mode(payload.get("content_mode") or payload.get("mode"))
+        default_planned = 4 if content_mode == "monetization" else 8
+        planned_clips = max(1, min(int(payload.get("planned_clips") or default_planned), 20))
         title = str(payload.get("title") or "").strip()
 
         with self._lock:
             data = self._read()
             sources = data.setdefault("sources", [])
-            existing = next((item for item in sources if str(item.get("source_url") or "").strip() == source_url), None)
+            existing = next(
+                (
+                    item
+                    for item in sources
+                    if str(item.get("source_url") or "").strip() == source_url
+                    and self._normalize_content_mode(item.get("content_mode")) == content_mode
+                ),
+                None,
+            )
             now = utc_now()
 
             if existing is not None:
                 existing["planned_clips"] = max(int(existing.get("planned_clips") or 0), planned_clips)
+                existing["content_mode"] = content_mode
                 if title:
                     existing["title"] = title
                 existing["updated_at"] = now
@@ -323,6 +336,7 @@ class SourceQueueManager:
                             "source_url": source_url,
                             "title": title,
                             "planned_clips": planned_clips,
+                            "content_mode": content_mode,
                             "posted_clips": 0,
                             "added_at": now,
                             "updated_at": now,
@@ -370,7 +384,16 @@ class SourceQueueManager:
     def _write(self, payload: dict[str, Any]) -> None:
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
+    def _normalize_content_mode(self, value: Any) -> str:
+        text = str(value or "").strip().lower().replace("-", "_")
+        if text in {"money", "monetize", "monetisation", "monetization", "creator_rewards", "long"}:
+            return "monetization"
+        if text in self.VALID_CONTENT_MODES:
+            return text
+        return "growth"
+
     def _normalize_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
+        content_mode = self._normalize_content_mode(entry.get("content_mode"))
         planned = max(1, int(entry.get("planned_clips") or 8))
         posted = max(0, int(entry.get("posted_clips") or 0))
         remaining = max(0, planned - posted)
@@ -382,6 +405,8 @@ class SourceQueueManager:
             "planned_clips": planned,
             "posted_clips": posted,
             "remaining_clips": remaining,
+            "content_mode": content_mode,
+            "mode_label": "Monetization" if content_mode == "monetization" else "Growth",
             "status": status,
             "added_at": str(entry.get("added_at") or utc_now()),
             "updated_at": str(entry.get("updated_at") or entry.get("added_at") or utc_now()),
