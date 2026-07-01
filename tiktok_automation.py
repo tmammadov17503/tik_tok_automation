@@ -1595,6 +1595,17 @@ class AutomationController:
             self._write_state(state)
         return self.status()
 
+    def ensure_scheduled(self, *, interval_hours: int = DEFAULT_AUTOMATION_INTERVAL_HOURS) -> dict[str, Any]:
+        with self._lock:
+            state = self._read_state()
+            interval_hours = max(1, min(int(interval_hours or DEFAULT_AUTOMATION_INTERVAL_HOURS), 24))
+            state["enabled"] = True
+            state["interval_hours"] = interval_hours
+            if not str(state.get("next_run_at") or "").strip():
+                state["next_run_at"] = utc_after(interval_hours * 60 * 60)
+            self._write_state(state)
+        return self.status()
+
     def run_now(self) -> dict[str, Any]:
         threading.Thread(target=self._run_cycle, kwargs={"forced": True}, daemon=True).start()
         return self.status()
@@ -1719,7 +1730,7 @@ class AutomationController:
                 if not state.get("enabled"):
                     return
 
-            self._refresh_remote_statuses()
+            status_updates = self._refresh_remote_statuses()
 
             if not forced:
                 next_run_at = iso_to_datetime(str(state.get("next_run_at") or ""))
@@ -1728,28 +1739,35 @@ class AutomationController:
 
             self._sync_public_video_metrics()
 
-            sequence_source = self._current_sequence_source()
-            sequence_source_id = str(sequence_source.get("id") or "") if sequence_source else None
-            next_item = self.post_queue.next_pending(sequence_source_id)
-            if next_item is None:
-                self._generate_from_next_source()
+            if status_updates:
+                self.append_log(
+                    f"Automation cycle refreshed {status_updates} TikTok status update(s); "
+                    "waiting for the next cooldown before starting another clip."
+                )
+            else:
                 sequence_source = self._current_sequence_source()
                 sequence_source_id = str(sequence_source.get("id") or "") if sequence_source else None
                 next_item = self.post_queue.next_pending(sequence_source_id)
 
-            if next_item is not None:
-                remote_pending_count = self.post_queue.remote_pending_count()
-                if remote_pending_count >= self.max_pending_shares:
-                    cap_message = (
-                        f"TikTok pending inbox cap reached ({remote_pending_count}/{self.max_pending_shares}); "
-                        "waiting before uploading another clip."
-                    )
-                    self.append_log(cap_message)
-                    self.notify(cap_message)
+                if next_item is None:
+                    self._generate_from_next_source()
+                    sequence_source = self._current_sequence_source()
+                    sequence_source_id = str(sequence_source.get("id") or "") if sequence_source else None
+                    next_item = self.post_queue.next_pending(sequence_source_id)
+
+                if next_item is not None:
+                    remote_pending_count = self.post_queue.remote_pending_count()
+                    if remote_pending_count >= self.max_pending_shares:
+                        cap_message = (
+                            f"TikTok pending inbox cap reached ({remote_pending_count}/{self.max_pending_shares}); "
+                            "waiting before uploading another clip."
+                        )
+                        self.append_log(cap_message)
+                        self.notify(cap_message)
+                    else:
+                        self._upload_queue_item(next_item)
                 else:
-                    self._upload_queue_item(next_item)
-            else:
-                self.append_log("Automation cycle found no pending clips to upload.")
+                    self.append_log("Automation cycle found no pending clips to upload.")
 
             with self._lock:
                 state = self._read_state()
@@ -1775,7 +1793,8 @@ class AutomationController:
         finally:
             self._running.release()
 
-    def _refresh_remote_statuses(self) -> None:
+    def _refresh_remote_statuses(self) -> int:
+        status_updates = 0
         for item in self.post_queue.active_items():
             publish_id = str(item.get("publish_id") or "").strip()
             if not publish_id:
@@ -1791,6 +1810,7 @@ class AutomationController:
 
             if remote_status == "PUBLISH_COMPLETE":
                 self._mark_item_posted(item, remote_status)
+                status_updates += 1
             elif remote_status == "SEND_TO_USER_INBOX":
                 was_already_delivered = item.get("status") == "sent_to_inbox"
                 self.post_queue.update_item(
@@ -1801,11 +1821,13 @@ class AutomationController:
                     error="",
                 )
                 if not was_already_delivered:
+                    mode_label = content_mode_label(item.get("content_mode"))
                     self.notify(
-                        f"Video sent to TikTok inbox: {item.get('clip_label') or 'generated clip'}. "
+                        f"{mode_label} video sent to TikTok inbox: {item.get('clip_label') or 'generated clip'}. "
                         f"{self.source_progress_line(str(item.get('source_id') or ''))}\n"
                         f"{self._caption_paste_message(item)}"
                     )
+                    status_updates += 1
             elif remote_status in {"PROCESSING_UPLOAD", "PROCESSING_DOWNLOAD"}:
                 self.post_queue.update_item(
                     str(item.get("id")),
@@ -1823,6 +1845,8 @@ class AutomationController:
                 message = f"{item.get('clip_label')} failed on TikTok: {fail_reason or 'unknown reason'}."
                 self.append_log(message)
                 self.notify(message)
+                status_updates += 1
+        return status_updates
 
     def _sync_public_video_metrics(self) -> dict[str, Any]:
         token_scope = str((self.auth.status() or {}).get("token_scope") or "")
@@ -2266,8 +2290,9 @@ class AutomationController:
         )
         self.append_log(f"{item.get('clip_label')} was sent to TikTok with status {status or queue_status}.")
         if queue_status == "sent_to_inbox":
+            mode_label = content_mode_label(item.get("content_mode"))
             self.notify(
-                f"Video sent to TikTok inbox: {item.get('clip_label') or 'generated clip'}. "
+                f"{mode_label} video sent to TikTok inbox: {item.get('clip_label') or 'generated clip'}. "
                 f"{self.source_progress_line(str(item.get('source_id') or ''))}\n"
                 f"{self._caption_paste_message(item)}"
             )

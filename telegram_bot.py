@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 
 YOUTUBE_URL_PATTERN = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s<>()]+", re.IGNORECASE)
 TRUE_VALUES = {"1", "true", "yes", "on"}
-BOT_COMMANDS_VERSION = "2026-06-30.monetization-mode-v1"
+BOT_COMMANDS_VERSION = "2026-07-01.queue-cooldown-v1"
 BOT_COMMANDS = [
     {"command": "start", "description": "Connect this chat and show help"},
     {"command": "status", "description": "Show automation and inbox counts"},
@@ -328,13 +328,11 @@ class TelegramBotService:
                 }
             )
 
-        self.automation.update_settings(
-            {"enabled": True, "interval_hours": DEFAULT_AUTOMATION_INTERVAL_HOURS, "next_run_at": utc_now()}
-        )
-        self.automation.run_now()
+        status = self.automation.ensure_scheduled(interval_hours=DEFAULT_AUTOMATION_INTERVAL_HOURS)
         count = len(urls)
         suffix = "" if count == 1 else "s"
         mode = mode_label(normalized_mode)
+        next_run = status.get("next_run_at") or "the next scheduled cycle"
         format_note = (
             "4 longer 60s+ monetization-test videos"
             if normalized_mode == "monetization"
@@ -344,7 +342,7 @@ class TelegramBotService:
             token,
             chat_id,
             f"Queued {count} YouTube link{suffix} in {mode} mode. Each link is set to {format_note}. "
-            f"I started the first run now; after that it runs every {DEFAULT_AUTOMATION_INTERVAL_HOURS} hours.",
+            f"I did not start an immediate run; it will wait for the normal cooldown. Next run: {next_run}.",
         )
 
     def _help_text(self) -> str:
