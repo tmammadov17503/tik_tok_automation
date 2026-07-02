@@ -377,6 +377,45 @@ class SourceQueueManager:
 
         return self.list_sources()
 
+    def mark_source_failure(self, source_id: str, error: str, *, max_failures: int = 2) -> dict[str, Any] | None:
+        with self._lock:
+            data = self._read()
+            sources = data.setdefault("sources", [])
+            target_index = next((index for index, item in enumerate(sources) if item.get("id") == source_id), None)
+            if target_index is None:
+                return None
+
+            target = sources[target_index]
+            failures = int(target.get("download_failures") or 0) + 1
+            target["download_failures"] = failures
+            target["last_error"] = str(error or "").strip()[:1000]
+            target["updated_at"] = utc_now()
+            if failures >= max(1, max_failures):
+                target["status"] = "failed"
+                target["failed_at"] = utc_now()
+            sources[target_index] = self._normalize_entry(target)
+            self._write(data)
+            return sources[target_index]
+
+    def clear_source_failure(self, source_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            data = self._read()
+            sources = data.setdefault("sources", [])
+            target_index = next((index for index, item in enumerate(sources) if item.get("id") == source_id), None)
+            if target_index is None:
+                return None
+
+            target = sources[target_index]
+            target["download_failures"] = 0
+            target["last_error"] = ""
+            if target.get("status") == "failed":
+                target.pop("failed_at", None)
+                target["status"] = ""
+            target["updated_at"] = utc_now()
+            sources[target_index] = self._normalize_entry(target)
+            self._write(data)
+            return sources[target_index]
+
     def remove_source(self, source_id: str) -> list[dict[str, Any]]:
         with self._lock:
             data = self._read()
@@ -428,6 +467,9 @@ class SourceQueueManager:
         posted = max(0, int(entry.get("posted_clips") or 0))
         remaining = max(0, planned - posted)
         status = "done" if remaining == 0 else ("active" if posted > 0 else "queued")
+        stored_status = str(entry.get("status") or "").strip().lower()
+        if stored_status in {"failed", "skipped"}:
+            status = stored_status
         if account_profile == "future_en" and status != "done":
             status = "parked"
         return {
@@ -443,6 +485,9 @@ class SourceQueueManager:
             "account_profile_label": "Future English account" if account_profile == "future_en" else "Film Box Official RU",
             "audience_language": audience_language,
             "status": status,
+            "download_failures": max(0, int(entry.get("download_failures") or 0)),
+            "last_error": str(entry.get("last_error") or "").strip(),
+            "failed_at": str(entry.get("failed_at") or "").strip(),
             "added_at": str(entry.get("added_at") or utc_now()),
             "updated_at": str(entry.get("updated_at") or entry.get("added_at") or utc_now()),
         }

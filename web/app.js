@@ -153,6 +153,12 @@ function sourceStatusLabel(status) {
   if (status === "parked") {
     return "Parked";
   }
+  if (status === "failed") {
+    return "Skipped";
+  }
+  if (status === "skipped") {
+    return "Skipped";
+  }
   return "Queued";
 }
 

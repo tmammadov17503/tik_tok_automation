@@ -109,6 +109,15 @@ def yt_dlp_video_format() -> str:
     )
 
 
+def yt_dlp_timeout_seconds() -> int:
+    raw = os.getenv("YTDLP_TIMEOUT_SECONDS", "420").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 420
+    return max(60, min(value, 1800))
+
+
 def requested_output_fps(request: dict[str, Any]) -> int | None:
     raw = str(request.get("frame_rate") or "source").strip().lower()
     if raw in {"50", "60"}:
@@ -215,6 +224,7 @@ def run_command(
     *,
     check: bool = True,
     env: dict[str, str] | None = None,
+    timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
@@ -223,6 +233,7 @@ def run_command(
         capture_output=True,
         text=True,
         env=env,
+        timeout=timeout,
     )
 
 
@@ -1025,7 +1036,11 @@ class WorkflowPipeline:
         *,
         allow_browser_cookies: bool,
     ) -> subprocess.CompletedProcess[str]:
-        completed = run_command(command, env=runtime_env(self.root), check=False)
+        timeout = yt_dlp_timeout_seconds()
+        try:
+            completed = run_command(command, env=runtime_env(self.root), check=False, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"yt-dlp timed out after {timeout} seconds while downloading the source.") from exc
         if completed.returncode == 0:
             return completed
 
@@ -1033,7 +1048,10 @@ class WorkflowPipeline:
             for browser in yt_dlp_cookie_browser_candidates():
                 job.log(f"YouTube requested sign-in; retrying with browser cookies from {browser}.")
                 retry_command = command[:1] + ["--cookies-from-browser", browser] + command[1:]
-                retry = run_command(retry_command, env=runtime_env(self.root), check=False)
+                try:
+                    retry = run_command(retry_command, env=runtime_env(self.root), check=False, timeout=timeout)
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError(f"yt-dlp timed out after {timeout} seconds while retrying with browser cookies.") from exc
                 if retry.returncode == 0:
                     return retry
 

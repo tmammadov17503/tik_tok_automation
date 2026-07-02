@@ -21,11 +21,13 @@ VIDEO_LIST_URL = (
     "?fields=id,create_time,share_url,video_description,duration,like_count,comment_count,share_count,view_count,title"
 )
 UPLOAD_ACTIVE_STATES = {"pending", "uploading", "processing", "sent_to_inbox"}
+GENERATION_BLOCKING_STATES = {"pending", "uploading", "processing"}
 REMOTE_TIKTOK_PENDING_STATES = {"uploading", "processing", "sent_to_inbox"}
 POST_QUEUE_KEEP_STATES = {"pending", "uploading", "processing", "sent_to_inbox", "posted"}
 DEFAULT_TIKTOK_MAX_PENDING_SHARES = 5
 DEFAULT_UPLOAD_MAX_ATTEMPTS = 4
 DEFAULT_AUTOMATION_INTERVAL_HOURS = 8
+DEFAULT_SOURCE_MAX_FAILURES = 2
 DEFAULT_TIKTOK_PUBLIC_USERNAME = "film.box.official"
 TIKTOK_MIN_CHUNK_SIZE = 5 * 1024 * 1024
 TIKTOK_MAX_CHUNK_SIZE = 64 * 1024 * 1024
@@ -1600,6 +1602,11 @@ class AutomationController:
         source_entry = progress.get("source")
         if source_entry is None:
             return "Source complete."
+        if source_entry.get("status") in {"failed", "skipped"}:
+            error = str(source_entry.get("last_error") or "source failed").strip()
+            if len(error) > 160:
+                error = error[:157] + "..."
+            return f"{content_mode_label(source_entry.get('content_mode'))}: skipped after source failure. {error}"
         source_profile = normalize_account_profile(source_entry.get("account_profile"))
         if source_profile != self._active_account_profile():
             return (
@@ -1715,6 +1722,11 @@ class AutomationController:
     def on_workflow_completed(self, request: dict[str, Any], output_dir: Path) -> None:
         source_id = str(request.get("source_queue_id") or "").strip()
         source_url = str(request.get("source_original_url") or request.get("source_value") or "").strip()
+        if source_id and hasattr(self.sources, "clear_source_failure"):
+            try:
+                self.sources.clear_source_failure(source_id)
+            except Exception:
+                pass
         source_entry = None
         if source_id:
             source_entry = next((item for item in self.sources.list_sources() if item.get("id") == source_id), None)
@@ -2247,6 +2259,8 @@ class AutomationController:
 
     def _current_sequence_source(self) -> dict[str, Any] | None:
         for source_entry in self._ordered_sources():
+            if source_entry.get("status") in {"failed", "skipped", "parked"}:
+                continue
             if self._source_is_finished(source_entry):
                 self._maybe_finalize_source(str(source_entry.get("id") or ""))
                 continue
@@ -2261,6 +2275,16 @@ class AutomationController:
             return
 
         source_id = str(source_entry.get("id") or "")
+        if any(
+            item.get("status") in GENERATION_BLOCKING_STATES
+            for item in self.post_queue.items_for_source(source_id)
+        ):
+            self.append_log(
+                f"Waiting for {source_entry.get('title') or source_entry.get('source_url')} "
+                "to finish the current generated clip before creating another one."
+            )
+            return
+
         pending_count = self.post_queue.allocated_count_for_source(source_id)
         planned = int(source_entry.get("planned_clips") or 0)
         posted = int(source_entry.get("posted_clips") or 0)
@@ -2321,8 +2345,42 @@ class AutomationController:
             f"({clip_duration_sec}s). "
             f"{self.source_progress_line(source_id)}"
         )
-        result = self.pipeline.run(job, request)
+        try:
+            result = self.pipeline.run(job, request)
+        except Exception as exc:
+            self._record_source_generation_failure(source_entry, exc)
+            return
         self.on_workflow_completed(request, result.output_dir)
+
+    def _record_source_generation_failure(self, source_entry: dict[str, Any], exc: Exception) -> None:
+        source_id = str(source_entry.get("id") or "")
+        label = source_entry.get("title") or source_entry.get("source_url") or "source"
+        error = str(exc)
+        max_failures = env_int(
+            "SOURCE_MAX_FAILURES",
+            DEFAULT_SOURCE_MAX_FAILURES,
+            minimum=1,
+            maximum=5,
+        )
+        updated = None
+        if source_id and hasattr(self.sources, "mark_source_failure"):
+            try:
+                updated = self.sources.mark_source_failure(source_id, error, max_failures=max_failures)
+            except Exception:
+                updated = None
+
+        failures = int((updated or source_entry).get("download_failures") or 0)
+        if (updated or {}).get("status") == "failed":
+            message = (
+                f"Skipped source after {failures}/{max_failures} failed generation attempt(s): {label}. "
+                "The next queued source will be tried on the next cycle."
+            )
+            self.append_log(message)
+            self.notify(f"{message}\nReason: {error[:700]}")
+        else:
+            message = f"Source generation failed {failures}/{max_failures} for {label}; it will retry once before being skipped."
+            self.append_log(message)
+            self.notify(f"{message}\nReason: {error[:700]}")
 
     def _pick_source_for_generation(self) -> dict[str, Any] | None:
         source_entry = self._current_sequence_source()
