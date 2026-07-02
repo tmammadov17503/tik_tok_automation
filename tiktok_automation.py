@@ -36,6 +36,8 @@ SOURCE_QUALITY_MIN_TOP_VIEWS = 300
 SOURCE_QUALITY_MIN_FOLLOWERS = 1
 CONTENT_MODE_GROWTH = "growth"
 CONTENT_MODE_MONETIZATION = "monetization"
+ACCOUNT_PROFILE_MAIN_RU = "main_ru"
+ACCOUNT_PROFILE_FUTURE_EN = "future_en"
 CONTENT_MODE_ALIASES = {
     "money": CONTENT_MODE_MONETIZATION,
     "monetize": CONTENT_MODE_MONETIZATION,
@@ -45,6 +47,18 @@ CONTENT_MODE_ALIASES = {
     "long": CONTENT_MODE_MONETIZATION,
     "growth": CONTENT_MODE_GROWTH,
     "short": CONTENT_MODE_GROWTH,
+}
+ACCOUNT_PROFILE_ALIASES = {
+    "main": ACCOUNT_PROFILE_MAIN_RU,
+    "main_ru": ACCOUNT_PROFILE_MAIN_RU,
+    "ru": ACCOUNT_PROFILE_MAIN_RU,
+    "russian": ACCOUNT_PROFILE_MAIN_RU,
+    "film_box": ACCOUNT_PROFILE_MAIN_RU,
+    "film_box_official": ACCOUNT_PROFILE_MAIN_RU,
+    "future_en": ACCOUNT_PROFILE_FUTURE_EN,
+    "english": ACCOUNT_PROFILE_FUTURE_EN,
+    "en": ACCOUNT_PROFILE_FUTURE_EN,
+    "english_account": ACCOUNT_PROFILE_FUTURE_EN,
 }
 MODE_PROFILES = {
     CONTENT_MODE_GROWTH: {
@@ -144,6 +158,25 @@ def content_mode_label(value: Any) -> str:
 
 def clip_label_prefix(value: Any) -> str:
     return str(content_mode_profile(value).get("clip_prefix") or "clip")
+
+
+def normalize_account_profile(value: Any) -> str:
+    key = str(value or "").strip().lower().replace("-", "_")
+    return ACCOUNT_PROFILE_ALIASES.get(key, ACCOUNT_PROFILE_MAIN_RU)
+
+
+def account_profile_label(value: Any) -> str:
+    profile = normalize_account_profile(value)
+    return "Future English account" if profile == ACCOUNT_PROFILE_FUTURE_EN else "Film Box Official RU"
+
+
+def normalize_audience_language(value: Any, *, account_profile: Any = None) -> str:
+    text = str(value or "").strip().lower()
+    if text.startswith("en"):
+        return "en"
+    if text.startswith("ru"):
+        return "ru"
+    return "en" if normalize_account_profile(account_profile) == ACCOUNT_PROFILE_FUTURE_EN else "ru"
 NON_RETRYABLE_ERROR_HINTS = (
     "scope_not_authorized",
     "access_token_invalid",
@@ -383,6 +416,11 @@ class PostQueueManager:
                 shutil.copy2(clip_path, stored_path)
                 now = utc_now()
                 content_mode = normalize_content_mode(source_entry.get("content_mode"))
+                account_profile = normalize_account_profile(source_entry.get("account_profile"))
+                audience_language = normalize_audience_language(
+                    source_entry.get("audience_language"),
+                    account_profile=account_profile,
+                )
                 items.append(
                     self._normalize_item(
                         {
@@ -391,6 +429,8 @@ class PostQueueManager:
                             "source_url": source_entry.get("source_url"),
                             "source_title": source_entry.get("title") or "Saved source",
                             "content_mode": content_mode,
+                            "account_profile": account_profile,
+                            "audience_language": audience_language,
                             "clip_label": clip_label,
                             "clip_path": str(stored_path),
                             "original_name": original_name,
@@ -483,6 +523,7 @@ class PostQueueManager:
     def _normalize_item(self, item: dict[str, Any]) -> dict[str, Any]:
         hashtags = normalize_tiktok_hashtags(item.get("hashtags") or self.default_hashtags)
         content_mode = normalize_content_mode(item.get("content_mode"))
+        account_profile = normalize_account_profile(item.get("account_profile"))
         return {
             "id": str(item.get("id") or uuid.uuid4().hex[:12]),
             "source_id": str(item.get("source_id") or ""),
@@ -490,6 +531,12 @@ class PostQueueManager:
             "source_title": str(item.get("source_title") or "Saved source"),
             "content_mode": content_mode,
             "mode_label": content_mode_label(content_mode),
+            "account_profile": account_profile,
+            "account_profile_label": account_profile_label(account_profile),
+            "audience_language": normalize_audience_language(
+                item.get("audience_language"),
+                account_profile=account_profile,
+            ),
             "clip_label": str(item.get("clip_label") or "Queued clip"),
             "clip_path": str(item.get("clip_path") or ""),
             "original_name": str(item.get("original_name") or ""),
@@ -1553,6 +1600,12 @@ class AutomationController:
         source_entry = progress.get("source")
         if source_entry is None:
             return "Source complete."
+        source_profile = normalize_account_profile(source_entry.get("account_profile"))
+        if source_profile != self._active_account_profile():
+            return (
+                f"{content_mode_label(source_entry.get('content_mode'))}: parked for "
+                f"{account_profile_label(source_profile)}; not running on this account."
+            )
         planned = progress["planned"]
         ready = progress["ready"]
         mode_label = content_mode_label(source_entry.get("content_mode"))
@@ -2107,13 +2160,21 @@ class AutomationController:
         return sum(1 for tag in CANONICAL_TIKTOK_HASHTAGS if tag.casefold() in description)
 
     def _ordered_sources(self) -> list[dict[str, Any]]:
+        active_profile = self._active_account_profile()
         return sorted(
-            self.sources.list_sources(),
+            [
+                source
+                for source in self.sources.list_sources()
+                if normalize_account_profile(source.get("account_profile")) == active_profile
+            ],
             key=lambda item: (
                 str(item.get("added_at") or ""),
                 str(item.get("id") or ""),
             ),
         )
+
+    def _active_account_profile(self) -> str:
+        return normalize_account_profile(os.getenv("TIKTOK_ACCOUNT_PROFILE", ACCOUNT_PROFILE_MAIN_RU))
 
     def _source_quality_snapshot(self, source_entry: dict[str, Any]) -> dict[str, Any]:
         source_id = str(source_entry.get("id") or "")
@@ -2212,6 +2273,11 @@ class AutomationController:
         source_url = str(source_entry.get("source_url") or "")
         excluded_segments = self._used_segments_for_source(source_id)
         content_mode = normalize_content_mode(source_entry.get("content_mode"))
+        account_profile = normalize_account_profile(source_entry.get("account_profile"))
+        audience_language = normalize_audience_language(
+            source_entry.get("audience_language"),
+            account_profile=account_profile,
+        )
         profile = content_mode_profile(content_mode)
         clip_duration_sec = int(source_entry.get("clip_duration_sec") or profile["clip_duration_sec"])
         clip_duration_sec = max(60, min(90, clip_duration_sec)) if content_mode == CONTENT_MODE_MONETIZATION else max(10, min(60, clip_duration_sec))
@@ -2219,6 +2285,8 @@ class AutomationController:
             {
                 "source_id": source_id,
                 "content_mode": content_mode,
+                "account_profile": account_profile,
+                "audience_language": audience_language,
                 "hashtags": self.post_queue.default_hashtags,
             }
         )
@@ -2236,7 +2304,7 @@ class AutomationController:
             "clips_count": 1,
             "selection_offset": 0 if excluded_segments else posted + pending_count,
             "frame_rate": "source",
-            "language": "auto",
+            "language": audience_language,
             "whisper_model": "small",
             "add_captions": True,
             "publish_mode": "tiktok_api",
@@ -2244,6 +2312,8 @@ class AutomationController:
             "hashtags": list(self.post_queue.default_hashtags),
             "caption_hint": caption_hint,
             "content_mode": content_mode,
+            "account_profile": account_profile,
+            "audience_language": audience_language,
         }
         job = AutomationJobProxy(self, source_entry)
         self.notify(

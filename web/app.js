@@ -150,6 +150,9 @@ function sourceStatusLabel(status) {
   if (status === "active") {
     return "In progress";
   }
+  if (status === "parked") {
+    return "Parked";
+  }
   return "Queued";
 }
 
@@ -174,6 +177,7 @@ function applySourceToRun(entry) {
   form.elements.source_value.value = entry.source_url;
   form.elements.clip_duration_sec.value = entry.content_mode === "monetization" ? "72" : "30";
   form.elements.clips_count.value = entry.content_mode === "monetization" ? "1" : "2";
+  form.elements.language.value = entry.audience_language || "ru";
   if (!form.elements.topic.value.trim() && entry.title) {
     form.elements.topic.value = entry.title;
   }
@@ -203,7 +207,7 @@ function renderSources(sources) {
 
     const meta = document.createElement("p");
     meta.className = "source-meta";
-    meta.textContent = `${entry.mode_label || "Growth"} mode · planned ${entry.planned_clips} clip${entry.planned_clips === 1 ? "" : "s"}`;
+    meta.textContent = (entry.mode_label || "Growth") + " mode - " + (entry.account_profile_label || "Film Box Official RU") + " - " + (entry.audience_language || "ru").toUpperCase() + " - planned " + entry.planned_clips + " clip" + (entry.planned_clips === 1 ? "" : "s");
 
     heading.appendChild(title);
     heading.appendChild(meta);
@@ -506,6 +510,8 @@ async function saveSource(event) {
     source_url: sourceForm.elements.source_url.value,
     planned_clips: Number(sourceForm.elements.planned_clips.value || 8),
     content_mode: sourceForm.elements.content_mode.value || "growth",
+    account_profile: sourceForm.elements.account_profile.value || "main_ru",
+    audience_language: sourceForm.elements.audience_language.value || "ru",
     title: sourceForm.elements.title.value,
   };
 
@@ -527,6 +533,8 @@ async function saveSource(event) {
   sourceForm.reset();
   sourceForm.elements.planned_clips.value = "8";
   sourceForm.elements.content_mode.value = "growth";
+  sourceForm.elements.account_profile.value = "main_ru";
+  sourceForm.elements.audience_language.value = "ru";
   renderSources(data.sources || []);
 }
 
@@ -876,6 +884,10 @@ sourceForm.addEventListener("submit", saveSource);
 sourceForm.elements.content_mode.addEventListener("change", () => {
   sourceForm.elements.planned_clips.value =
     sourceForm.elements.content_mode.value === "monetization" ? "4" : "8";
+});
+sourceForm.elements.account_profile.addEventListener("change", () => {
+  sourceForm.elements.audience_language.value =
+    sourceForm.elements.account_profile.value === "future_en" ? "en" : "ru";
 });
 automationForm.addEventListener("submit", saveAutomationSettings);
 automationRunButton.addEventListener("click", runAutomationNow);

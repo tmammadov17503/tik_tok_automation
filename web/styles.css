@@ -229,6 +229,12 @@ h1 {
   color: var(--accent);
 }
 
+.source-badge.parked {
+  color: var(--muted);
+  border-color: rgba(82, 91, 105, 0.24);
+  background: rgba(82, 91, 105, 0.08);
+}
+
 .source-badge.active {
   color: var(--ok);
   border-color: rgba(31, 122, 77, 0.24);

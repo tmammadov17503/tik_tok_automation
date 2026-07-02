@@ -280,6 +280,7 @@ class JobRegistry:
 
 class SourceQueueManager:
     VALID_CONTENT_MODES = {"growth", "monetization"}
+    VALID_ACCOUNT_PROFILES = {"main_ru", "future_en"}
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -303,6 +304,11 @@ class SourceQueueManager:
             raise ValueError("Please enter a source URL.")
 
         content_mode = self._normalize_content_mode(payload.get("content_mode") or payload.get("mode"))
+        account_profile = self._normalize_account_profile(payload.get("account_profile"))
+        audience_language = self._normalize_audience_language(
+            payload.get("audience_language"),
+            account_profile=account_profile,
+        )
         default_planned = 4 if content_mode == "monetization" else 8
         planned_clips = max(1, min(int(payload.get("planned_clips") or default_planned), 20))
         title = str(payload.get("title") or "").strip()
@@ -316,6 +322,7 @@ class SourceQueueManager:
                     for item in sources
                     if str(item.get("source_url") or "").strip() == source_url
                     and self._normalize_content_mode(item.get("content_mode")) == content_mode
+                    and self._normalize_account_profile(item.get("account_profile")) == account_profile
                 ),
                 None,
             )
@@ -324,6 +331,8 @@ class SourceQueueManager:
             if existing is not None:
                 existing["planned_clips"] = max(int(existing.get("planned_clips") or 0), planned_clips)
                 existing["content_mode"] = content_mode
+                existing["account_profile"] = account_profile
+                existing["audience_language"] = audience_language
                 if title:
                     existing["title"] = title
                 existing["updated_at"] = now
@@ -337,6 +346,8 @@ class SourceQueueManager:
                             "title": title,
                             "planned_clips": planned_clips,
                             "content_mode": content_mode,
+                            "account_profile": account_profile,
+                            "audience_language": audience_language,
                             "posted_clips": 0,
                             "added_at": now,
                             "updated_at": now,
@@ -392,12 +403,33 @@ class SourceQueueManager:
             return text
         return "growth"
 
+    def _normalize_account_profile(self, value: Any) -> str:
+        text = str(value or "").strip().lower().replace("-", "_")
+        if text in {"future_en", "english", "en", "english_account"}:
+            return "future_en"
+        return "main_ru"
+
+    def _normalize_audience_language(self, value: Any, *, account_profile: str) -> str:
+        text = str(value or "").strip().lower()
+        if text.startswith("en"):
+            return "en"
+        if text.startswith("ru"):
+            return "ru"
+        return "en" if account_profile == "future_en" else "ru"
+
     def _normalize_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
         content_mode = self._normalize_content_mode(entry.get("content_mode"))
+        account_profile = self._normalize_account_profile(entry.get("account_profile"))
+        audience_language = self._normalize_audience_language(
+            entry.get("audience_language"),
+            account_profile=account_profile,
+        )
         planned = max(1, int(entry.get("planned_clips") or 8))
         posted = max(0, int(entry.get("posted_clips") or 0))
         remaining = max(0, planned - posted)
         status = "done" if remaining == 0 else ("active" if posted > 0 else "queued")
+        if account_profile == "future_en" and status != "done":
+            status = "parked"
         return {
             "id": str(entry.get("id") or uuid.uuid4().hex[:10]),
             "source_url": str(entry.get("source_url") or "").strip(),
@@ -407,6 +439,9 @@ class SourceQueueManager:
             "remaining_clips": remaining,
             "content_mode": content_mode,
             "mode_label": "Monetization" if content_mode == "monetization" else "Growth",
+            "account_profile": account_profile,
+            "account_profile_label": "Future English account" if account_profile == "future_en" else "Film Box Official RU",
+            "audience_language": audience_language,
             "status": status,
             "added_at": str(entry.get("added_at") or utc_now()),
             "updated_at": str(entry.get("updated_at") or entry.get("added_at") or utc_now()),
