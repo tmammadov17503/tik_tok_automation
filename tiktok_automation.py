@@ -27,6 +27,9 @@ DEFAULT_TIKTOK_MAX_PENDING_SHARES = 5
 DEFAULT_UPLOAD_MAX_ATTEMPTS = 4
 DEFAULT_AUTOMATION_INTERVAL_HOURS = 8
 DEFAULT_TIKTOK_PUBLIC_USERNAME = "film.box.official"
+TIKTOK_MIN_CHUNK_SIZE = 5 * 1024 * 1024
+TIKTOK_MAX_CHUNK_SIZE = 64 * 1024 * 1024
+TIKTOK_UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024
 SOURCE_QUALITY_MIN_POSTED = 6
 SOURCE_QUALITY_MIN_AVG_VIEWS = 150
 SOURCE_QUALITY_MIN_TOP_VIEWS = 300
@@ -256,16 +259,40 @@ def json_http_request(
         raise RuntimeError("TikTok returned a non-JSON response.") from exc
 
 
-def upload_binary(url: str, data: bytes, *, content_type: str) -> int:
-    total = len(data)
+def tiktok_upload_plan(total: int) -> tuple[int, int]:
+    if total <= 0:
+        raise RuntimeError("Clip file is empty.")
+    if total < TIKTOK_MIN_CHUNK_SIZE or total <= TIKTOK_MAX_CHUNK_SIZE:
+        return total, 1
+
+    chunk_size = TIKTOK_UPLOAD_CHUNK_SIZE
+    total_chunks = total // chunk_size
+    if total_chunks < 2:
+        total_chunks = 2
+    if total_chunks > 1000:
+        raise RuntimeError("Clip file is too large for TikTok chunked upload.")
+    return chunk_size, total_chunks
+
+
+def upload_binary_chunk(
+    url: str,
+    data: bytes,
+    *,
+    content_type: str,
+    first_byte: int,
+    total: int,
+) -> int:
+    if not data:
+        raise RuntimeError("Cannot upload an empty TikTok media chunk.")
+    last_byte = first_byte + len(data) - 1
     request = Request(
         url,
         data=data,
         method="PUT",
         headers={
             "Content-Type": content_type,
-            "Content-Length": str(total),
-            "Content-Range": f"bytes 0-{max(0, total - 1)}/{total}",
+            "Content-Length": str(len(data)),
+            "Content-Range": f"bytes {first_byte}-{last_byte}/{total}",
         },
     )
     try:
@@ -277,6 +304,27 @@ def upload_binary(url: str, data: bytes, *, content_type: str) -> int:
         raise RuntimeError(body or str(exc)) from exc
     except URLError as exc:
         raise RuntimeError(f"Network error while uploading media: {exc.reason}") from exc
+
+
+def upload_file_chunks(url: str, clip_path: Path, *, content_type: str, chunk_size: int, total_chunks: int) -> None:
+    total = clip_path.stat().st_size
+    with clip_path.open("rb") as handle:
+        for index in range(total_chunks):
+            first_byte = index * chunk_size
+            expected_size = total - first_byte if index == total_chunks - 1 else chunk_size
+            data = handle.read(expected_size)
+            status_code = with_retry(
+                lambda data=data, first_byte=first_byte: upload_binary_chunk(
+                    url,
+                    data,
+                    content_type=content_type,
+                    first_byte=first_byte,
+                    total=total,
+                ),
+                label=f"TikTok media upload chunk {index + 1}/{total_chunks}",
+            )
+            if status_code not in {200, 201, 206}:
+                raise RuntimeError(f"TikTok media upload returned unexpected status {status_code}.")
 
 
 class PostQueueManager:
@@ -1039,12 +1087,13 @@ class TikTokPublisher:
         if clip_size <= 0:
             raise RuntimeError("Clip file is empty.")
 
+        chunk_size, total_chunk_count = tiktok_upload_plan(clip_size)
         init_payload = {
             "source_info": {
                 "source": "FILE_UPLOAD",
                 "video_size": clip_size,
-                "chunk_size": clip_size,
-                "total_chunk_count": 1,
+                "chunk_size": chunk_size,
+                "total_chunk_count": total_chunk_count,
             }
         }
         response = with_retry(
@@ -1067,13 +1116,13 @@ class TikTokPublisher:
             raise RuntimeError("TikTok did not return publish_id or upload_url.")
 
         content_type = mimetypes.guess_type(clip_path.name)[0] or "video/mp4"
-        clip_bytes = clip_path.read_bytes()
-        status_code = with_retry(
-            lambda: upload_binary(upload_url, clip_bytes, content_type=content_type),
-            label="TikTok media upload",
+        upload_file_chunks(
+            upload_url,
+            clip_path,
+            content_type=content_type,
+            chunk_size=chunk_size,
+            total_chunks=total_chunk_count,
         )
-        if status_code not in {200, 201, 206}:
-            raise RuntimeError(f"TikTok media upload returned unexpected status {status_code}.")
 
         status = self.fetch_status(publish_id)
         return {
