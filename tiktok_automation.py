@@ -2371,9 +2371,11 @@ class AutomationController:
 
         failures = int((updated or source_entry).get("download_failures") or 0)
         if (updated or {}).get("status") == "failed":
+            if source_id:
+                shutil.rmtree(self._source_cache_dir(source_id), ignore_errors=True)
             message = (
                 f"Skipped source after {failures}/{max_failures} failed generation attempt(s): {label}. "
-                "The next queued source will be tried on the next cycle."
+                "It was removed from the source queue; the next queued source will be tried on the next cycle."
             )
             self.append_log(message)
             self.notify(f"{message}\nReason: {error[:700]}")

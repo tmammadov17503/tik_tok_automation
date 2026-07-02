@@ -393,7 +393,13 @@ class SourceQueueManager:
             if failures >= max(1, max_failures):
                 target["status"] = "failed"
                 target["failed_at"] = utc_now()
-            sources[target_index] = self._normalize_entry(target)
+            normalized = self._normalize_entry(target)
+            if normalized["status"] == "failed":
+                data["sources"] = [item for item in sources if item.get("id") != source_id]
+                self._write(data)
+                return normalized
+
+            sources[target_index] = normalized
             self._write(data)
             return sources[target_index]
 
