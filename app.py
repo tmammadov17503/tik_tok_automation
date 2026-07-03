@@ -446,7 +446,7 @@ class SourceQueueManager:
             return "monetization"
         if text in self.VALID_CONTENT_MODES:
             return text
-        return "growth"
+        return "monetization"
 
     def _normalize_account_profile(self, value: Any) -> str:
         text = str(value or "").strip().lower().replace("-", "_")

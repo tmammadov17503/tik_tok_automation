@@ -515,7 +515,7 @@ async function saveSource(event) {
   const payload = {
     source_url: sourceForm.elements.source_url.value,
     planned_clips: Number(sourceForm.elements.planned_clips.value || 8),
-    content_mode: sourceForm.elements.content_mode.value || "growth",
+    content_mode: sourceForm.elements.content_mode.value || "monetization",
     account_profile: sourceForm.elements.account_profile.value || "main_ru",
     audience_language: sourceForm.elements.audience_language.value || "ru",
     title: sourceForm.elements.title.value,
@@ -538,7 +538,7 @@ async function saveSource(event) {
 
   sourceForm.reset();
   sourceForm.elements.planned_clips.value = "8";
-  sourceForm.elements.content_mode.value = "growth";
+  sourceForm.elements.content_mode.value = "monetization";
   sourceForm.elements.account_profile.value = "main_ru";
   sourceForm.elements.audience_language.value = "ru";
   renderSources(data.sources || []);

@@ -92,9 +92,9 @@ Source subtitles are used first because they are free and already timestamped. I
 
 Telegram source modes:
 
-- Paste a YouTube link normally to queue 8 short 30-second growth clips.
-- Send `/growth <YouTube link>` to explicitly queue the normal growth format.
-- Send `/money <YouTube link>` to queue 8 longer 60s+ monetization test videos with separate labels and captions.
+- Paste a YouTube link normally to queue 8 longer 60s+ monetization test videos with separate labels and captions.
+- Send `/money <YouTube link>` for the same monetization queue if you want to be explicit.
+- Send `/growth <YouTube link>` only if you intentionally want the older 30-second growth format.
 
 ## Optional TikTok MongoDB Analytics
 

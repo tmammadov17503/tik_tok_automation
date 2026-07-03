@@ -363,14 +363,14 @@ class TelegramBotService:
 
         urls = [url.rstrip(".,;") for url in YOUTUBE_URL_PATTERN.findall(text)]
         if not urls:
-            self._send_message(token, chat_id, "Send me a YouTube link, or use /status and /queue.")
+            self._send_message(token, chat_id, "Send me a YouTube link to queue monetization videos, or use /status and /queue.")
             return
 
         self._queue_source_urls(
             token,
             chat_id,
             urls,
-            "growth",
+            "monetization",
             account_profile=ACCOUNT_PROFILE_MAIN_RU,
             audience_language="ru",
         )
@@ -432,14 +432,14 @@ class TelegramBotService:
 
     def _help_text(self) -> str:
         return (
-            "Send a YouTube link and I will queue 8 short growth videos from it.\n"
-            "Use /moneyru <YouTube link> for 8 longer 60s+ RU monetization videos on the main account.\n"
+            "Send a YouTube link and I will queue 8 longer 60s+ RU monetization videos from it.\n"
+            "Use /moneyru <YouTube link> for the same monetization queue if you want to be explicit.\n"
             "Use /moneyen <YouTube link> to park English monetization sources for a future English account.\n\n"
             "/status - current automation counts\n"
             "/queue - source links and clip progress\n"
             "/moneyru <link> - queue RU 60s+ monetization videos\n"
             "/moneyen <link> - park EN 60s+ monetization sources\n"
-            "/growth <link> - queue normal 30s growth videos\n"
+            "/growth <link> - optional old 30s growth mode\n"
             "/clips - recent clip labels for metrics\n"
             "/metrics [clip] views likes comments saves shares - record TikTok results\n"
             "/studio [clip] views=16.4k likes=689 saves=51 shares=6 avg=17.9s full=37.41 followers=17 play=83h38m36s\n"
