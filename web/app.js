@@ -888,8 +888,7 @@ runtimeForm.addEventListener("submit", saveRuntimeSettings);
 telegramForm.addEventListener("submit", saveTelegramSettings);
 sourceForm.addEventListener("submit", saveSource);
 sourceForm.elements.content_mode.addEventListener("change", () => {
-  sourceForm.elements.planned_clips.value =
-    sourceForm.elements.content_mode.value === "monetization" ? "4" : "8";
+  sourceForm.elements.planned_clips.value = "8";
 });
 sourceForm.elements.account_profile.addEventListener("change", () => {
   sourceForm.elements.audience_language.value =

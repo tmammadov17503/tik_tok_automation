@@ -309,7 +309,7 @@ class SourceQueueManager:
             payload.get("audience_language"),
             account_profile=account_profile,
         )
-        default_planned = 4 if content_mode == "monetization" else 8
+        default_planned = 8
         planned_clips = max(1, min(int(payload.get("planned_clips") or default_planned), 20))
         title = str(payload.get("title") or "").strip()
 

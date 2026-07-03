@@ -26,7 +26,7 @@ REMOTE_TIKTOK_PENDING_STATES = {"uploading", "processing", "sent_to_inbox"}
 POST_QUEUE_KEEP_STATES = {"pending", "uploading", "processing", "sent_to_inbox", "posted"}
 DEFAULT_TIKTOK_MAX_PENDING_SHARES = 5
 DEFAULT_UPLOAD_MAX_ATTEMPTS = 4
-DEFAULT_AUTOMATION_INTERVAL_HOURS = 8
+DEFAULT_AUTOMATION_INTERVAL_HOURS = 4
 DEFAULT_SOURCE_MAX_FAILURES = 2
 DEFAULT_TIKTOK_PUBLIC_USERNAME = "film.box.official"
 TIKTOK_MIN_CHUNK_SIZE = 5 * 1024 * 1024
@@ -73,7 +73,7 @@ MODE_PROFILES = {
         "label": "Monetization",
         "clip_prefix": "money",
         "clip_duration_sec": 72,
-        "default_planned_clips": 4,
+        "default_planned_clips": 8,
     },
 }
 CANONICAL_TIKTOK_HASHTAGS = [
@@ -1063,7 +1063,7 @@ class PerformanceMetricsStore:
             )
         if weak_rows:
             return "A few sources are below 120 average views with weak like rate; replace those with stronger hooks."
-        return "Keep the 8-hour cadence and add fresh sources; the account is still building a reliable baseline."
+        return "Keep the 4-hour monetization cadence and add fresh sources; the account is still building a reliable baseline."
 
     def _normalize_metric(self, metric: dict[str, Any]) -> dict[str, Any]:
         views = max(0, safe_int(metric.get("views"), 0))
@@ -1636,10 +1636,7 @@ class AutomationController:
         self._mark_item_posted(item, "MANUAL_POSTED", notify=False)
         return {
             "ok": True,
-            "message": (
-                f"Marked {label} as posted. {self.source_progress_line(source_id)}\n"
-                f"Later send: /metrics {label} views likes comments saves shares"
-            ),
+            "message": f"Marked {label} as posted. {self.source_progress_line(source_id)}",
         }
 
     def record_performance_metrics(
@@ -2509,11 +2506,7 @@ class AutomationController:
         self.append_log(f"{item.get('clip_label')} completed on TikTok and was removed from local queued storage.")
         if notify:
             label = item.get("clip_label") or "latest"
-            self.notify(
-                f"Posted confirmed for {label}. "
-                f"{self.source_progress_line(source_id)}\n"
-                f"Later send: /metrics {label} views likes comments saves shares"
-            )
+            self.notify(f"Posted confirmed for {label}. {self.source_progress_line(source_id)}")
 
     def _maybe_finalize_source(self, source_id: str) -> None:
         source_entry = next((item for item in self.sources.list_sources() if item.get("id") == source_id), None)

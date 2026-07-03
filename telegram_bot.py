@@ -30,12 +30,12 @@ BOT_COMMANDS = [
     {"command": "performance", "description": "Show recent TikTok performance"},
     {"command": "run", "description": "Start one automation run now"},
     {"command": "pause", "description": "Pause scheduled runs"},
-    {"command": "resume", "description": "Resume the 8-hour schedule"},
+    {"command": "resume", "description": "Resume the 4-hour schedule"},
     {"command": "posted", "description": "Mark oldest inbox video as posted"},
     {"command": "help", "description": "Show available commands"},
 ]
-DEFAULT_AUTOMATION_INTERVAL_HOURS = 8
-MODE_DEFAULT_CLIPS = {"growth": 8, "monetization": 4}
+DEFAULT_AUTOMATION_INTERVAL_HOURS = 4
+MODE_DEFAULT_CLIPS = {"growth": 8, "monetization": 8}
 ACCOUNT_PROFILE_MAIN_RU = "main_ru"
 ACCOUNT_PROFILE_FUTURE_EN = "future_en"
 
@@ -321,7 +321,7 @@ class TelegramBotService:
         if command in {"/money", "/moneyru", "/monetization", "/monetize"}:
             urls = [url.rstrip(".,;") for url in YOUTUBE_URL_PATTERN.findall(text)]
             if not urls:
-                self._send_message(token, chat_id, "Usage: /moneyru https://youtu.be/...  This queues 4 longer 60s+ RU monetization test videos for the main account.")
+                self._send_message(token, chat_id, "Usage: /moneyru https://youtu.be/...  This queues 8 longer 60s+ RU monetization test videos for the main account.")
                 return
             self._queue_source_urls(
                 token,
@@ -414,7 +414,7 @@ class TelegramBotService:
         mode = mode_label(normalized_mode)
         next_run = status.get("next_run_at") or "the next scheduled cycle"
         format_note = (
-            "4 longer 60s+ monetization-test videos"
+            "8 longer 60s+ monetization-test videos"
             if normalized_mode == "monetization"
             else "8 short 30s growth videos"
         )
@@ -433,7 +433,7 @@ class TelegramBotService:
     def _help_text(self) -> str:
         return (
             "Send a YouTube link and I will queue 8 short growth videos from it.\n"
-            "Use /moneyru <YouTube link> for 4 longer 60s+ RU monetization videos on the main account.\n"
+            "Use /moneyru <YouTube link> for 8 longer 60s+ RU monetization videos on the main account.\n"
             "Use /moneyen <YouTube link> to park English monetization sources for a future English account.\n\n"
             "/status - current automation counts\n"
             "/queue - source links and clip progress\n"

@@ -94,7 +94,7 @@ Telegram source modes:
 
 - Paste a YouTube link normally to queue 8 short 30-second growth clips.
 - Send `/growth <YouTube link>` to explicitly queue the normal growth format.
-- Send `/money <YouTube link>` to queue 4 longer 60s+ monetization test videos with separate labels and captions.
+- Send `/money <YouTube link>` to queue 8 longer 60s+ monetization test videos with separate labels and captions.
 
 ## Optional TikTok MongoDB Analytics
 
