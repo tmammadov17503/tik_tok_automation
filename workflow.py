@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 
 SEGMENT_PATTERN = re.compile(r"^\s*(?P<start>[^-]+)\s*-\s*(?P<end>[^-]+)\s*$")
@@ -85,28 +86,70 @@ def openai_transcription_model() -> str:
 
 
 def yt_dlp_js_args() -> list[str]:
-    if shutil.which("node"):
-        args = ["--js-runtimes", "node"]
-        if not _module_exists("yt_dlp_ejs"):
-            args.extend(["--remote-components", "ejs:github"])
-        return args
-    if shutil.which("deno"):
-        return ["--js-runtimes", "deno", "--remote-components", "ejs:npm"]
+    deno = shutil.which("deno")
+    if not deno:
+        deno_path = Path.home() / ".deno" / "bin" / "deno"
+        if deno_path.exists():
+            deno = str(deno_path)
+    if deno:
+        return ["--js-runtimes", f"deno:{deno}", "--remote-components", "ejs:npm"]
+    node = shutil.which("node")
+    if node:
+        try:
+            completed = subprocess.run([node, "--version"], text=True, capture_output=True, timeout=5)
+            version = (completed.stdout or completed.stderr or "").strip().lstrip("v")
+            major = int((version.split(".", 1)[0] or "0").strip())
+        except Exception:
+            major = 0
+        if major >= 22:
+            args = ["--js-runtimes", "node"]
+            if not _module_exists("yt_dlp_ejs"):
+                args.extend(["--remote-components", "ejs:github"])
+            return args
+    if shutil.which("qjs"):
+        return ["--js-runtimes", "quickjs"]
     return []
 
 
 def yt_dlp_video_extractor_args() -> str:
-    return "youtube:player_client=web_safari,web"
+    return os.getenv("YTDLP_EXTRACTOR_ARGS", "").strip()
+
+
+def yt_dlp_extractor_args() -> list[str]:
+    extractor_args = yt_dlp_video_extractor_args()
+    if not extractor_args:
+        return []
+    return ["--extractor-args", extractor_args]
 
 
 def yt_dlp_video_format() -> str:
     return (
-        "best[protocol=m3u8_native][height<=1080]/"
-        "best[protocol=m3u8][height<=1080]/"
-        "bestvideo[height<=1080]*+bestaudio/"
-        "best[height<=1080]/"
+        "best[protocol=m3u8_native][height<=720]/"
+        "best[protocol=m3u8][height<=720]/"
+        "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/"
+        "bestvideo[height<=720]+bestaudio/"
+        "best[ext=mp4][height<=720]/"
+        "best[height<=720]/"
         "best"
     )
+
+
+def canonical_youtube_url(url: str) -> str:
+    parsed = urlparse(str(url or "").strip())
+    host = parsed.netloc.lower()
+    video_id = ""
+    if host.endswith("youtu.be"):
+        video_id = parsed.path.strip("/").split("/", 1)[0]
+    elif host.endswith("youtube.com") or host.endswith("youtube-nocookie.com"):
+        if parsed.path == "/watch":
+            video_id = (parse_qs(parsed.query).get("v") or [""])[0]
+        elif parsed.path.startswith("/shorts/") or parsed.path.startswith("/embed/"):
+            parts = [part for part in parsed.path.split("/") if part]
+            if len(parts) >= 2:
+                video_id = parts[1]
+    if not video_id:
+        return str(url or "").strip()
+    return f"https://www.youtube.com/watch?v={video_id}"
 
 
 def yt_dlp_timeout_seconds() -> int:
@@ -572,7 +615,7 @@ def runtime_env(root: Path | None = None) -> dict[str, str]:
     if ffmpeg:
         ffmpeg_path = Path(ffmpeg[0]).resolve()
         ffmpeg_dir = ffmpeg_path.parent
-        if root is not None and ffmpeg_path.name.lower() != "ffmpeg.exe":
+        if os.name == "nt" and root is not None and ffmpeg_path.name.lower() != "ffmpeg.exe":
             tool_dir = root / ".tools"
             tool_dir.mkdir(parents=True, exist_ok=True)
             shim_path = tool_dir / "ffmpeg.exe"
@@ -582,7 +625,7 @@ def runtime_env(root: Path | None = None) -> dict[str, str]:
         current_path = env.get("PATH", "")
         ffmpeg_dir_str = str(ffmpeg_dir)
         if ffmpeg_dir_str.lower() not in current_path.lower():
-            env["PATH"] = ffmpeg_dir_str if not current_path else f"{ffmpeg_dir_str};{current_path}"
+            env["PATH"] = ffmpeg_dir_str if not current_path else f"{ffmpeg_dir_str}{os.pathsep}{current_path}"
     return env
 
 
@@ -592,7 +635,7 @@ def yt_dlp_ffmpeg_args(root: Path | None = None) -> list[str]:
         return []
     ffmpeg_path = Path(ffmpeg[0]).resolve()
     ffmpeg_dir = ffmpeg_path.parent
-    if root is not None and ffmpeg_path.name.lower() != "ffmpeg.exe":
+    if os.name == "nt" and root is not None and ffmpeg_path.name.lower() != "ffmpeg.exe":
         tool_dir = root / ".tools"
         tool_dir.mkdir(parents=True, exist_ok=True)
         shim_path = tool_dir / "ffmpeg.exe"
@@ -1076,6 +1119,8 @@ class WorkflowPipeline:
     def _resolve_source(self, job: Any, request: dict[str, Any], job_dir: Path) -> SourceBundle:
         source_mode = request["source_mode"]
         source_value = request["source_value"]
+        if source_mode == "remote_url":
+            source_value = canonical_youtube_url(source_value)
 
         if source_mode == "local_file":
             source_path = Path(source_value).expanduser().resolve()
@@ -1109,8 +1154,7 @@ class WorkflowPipeline:
             "1",
             "--max-sleep-interval",
             "3",
-            "--extractor-args",
-            yt_dlp_video_extractor_args(),
+            *yt_dlp_extractor_args(),
             *yt_dlp_js_args(),
             "--no-progress",
             "--write-info-json",
@@ -1134,8 +1178,7 @@ class WorkflowPipeline:
             "1",
             "--max-sleep-interval",
             "3",
-            "--extractor-args",
-            yt_dlp_video_extractor_args(),
+            *yt_dlp_extractor_args(),
             *yt_dlp_js_args(),
             "--no-progress",
             "--skip-download",
@@ -1225,8 +1268,7 @@ class WorkflowPipeline:
             "1",
             "--max-sleep-interval",
             "3",
-            "--extractor-args",
-            yt_dlp_video_extractor_args(),
+            *yt_dlp_extractor_args(),
             *yt_dlp_js_args(),
             "--no-progress",
             "--write-info-json",
@@ -1278,8 +1320,7 @@ class WorkflowPipeline:
                 "1",
                 "--max-sleep-interval",
                 "3",
-                "--extractor-args",
-                yt_dlp_video_extractor_args(),
+                *yt_dlp_extractor_args(),
                 *yt_dlp_js_args(),
                 "--no-progress",
                 "--write-info-json",

@@ -244,6 +244,8 @@ def is_youtube_download_blocker(error: str, source_url: str = "") -> bool:
     message = str(error or "").lower()
     source = str(source_url or "").lower()
     is_youtube_source = "youtu.be/" in source or "youtube.com/" in source or "youtube" in message or "[youtube]" in message
+    if "timed out" in message or "timeout" in message:
+        return False
     permanent_errors = (
         "this video is unavailable",
         "video unavailable",
@@ -269,6 +271,13 @@ def is_youtube_download_blocker(error: str, source_url: str = "") -> bool:
     )
     generic_yt_dlp_failure = "yt-dlp" in message or "downloading web player api json" in message
     return is_youtube_source and (generic_yt_dlp_failure or any(blocker in message for blocker in blockers))
+
+
+def is_youtube_download_timeout(error: str, source_url: str = "") -> bool:
+    message = str(error or "").lower()
+    source = str(source_url or "").lower()
+    is_youtube_source = "youtu.be/" in source or "youtube.com/" in source or "youtube" in message or "[youtube]" in message
+    return is_youtube_source and ("timed out" in message or "timeout" in message)
 
 
 def with_retry(operation: Any, *, label: str, attempts: int = 3) -> Any:
@@ -2419,6 +2428,20 @@ class AutomationController:
         label = source_entry.get("title") or source_entry.get("source_url") or "source"
         error = str(exc)
         source_url = str(source_entry.get("source_url") or "")
+        if is_youtube_download_timeout(error, source_url):
+            if source_id and hasattr(self.sources, "defer_source_failure"):
+                try:
+                    self.sources.defer_source_failure(source_id, error)
+                except Exception:
+                    pass
+            message = (
+                f"Source download timed out for {label}. "
+                "Parked in queue so it is not lost; it can be retried after increasing the download timeout."
+            )
+            self.append_log(message)
+            self.notify(f"{message}\nReason: {error[:700]}")
+            return
+
         if is_youtube_download_blocker(error, source_url):
             if source_id and hasattr(self.sources, "defer_source_failure"):
                 try:
