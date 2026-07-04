@@ -240,6 +240,37 @@ def is_retryable_tiktok_error(error: BaseException) -> bool:
     return any(hint in message for hint in RETRYABLE_ERROR_HINTS)
 
 
+def is_youtube_download_blocker(error: str, source_url: str = "") -> bool:
+    message = str(error or "").lower()
+    source = str(source_url or "").lower()
+    is_youtube_source = "youtu.be/" in source or "youtube.com/" in source or "youtube" in message or "[youtube]" in message
+    permanent_errors = (
+        "this video is unavailable",
+        "video unavailable",
+        "private video",
+        "has been removed",
+        "account associated with this video has been terminated",
+        "members-only content",
+        "premieres in",
+    )
+    if is_youtube_source and any(hint in message for hint in permanent_errors):
+        return False
+
+    blockers = (
+        "sign in to confirm",
+        "not a bot",
+        "youtube blocked the download request",
+        "cookies",
+        "n challenge solving failed",
+        "only images are available",
+        "requested format is not available",
+        "po token",
+        "gvs po token",
+    )
+    generic_yt_dlp_failure = "yt-dlp" in message or "downloading web player api json" in message
+    return is_youtube_source and (generic_yt_dlp_failure or any(blocker in message for blocker in blockers))
+
+
 def with_retry(operation: Any, *, label: str, attempts: int = 3) -> Any:
     last_error: BaseException | None = None
     for attempt in range(1, max(1, attempts) + 1):
@@ -1614,6 +1645,12 @@ class AutomationController:
             if len(error) > 160:
                 error = error[:157] + "..."
             return f"{content_mode_label(source_entry.get('content_mode'))}: skipped after source failure. {error}"
+        if source_entry.get("status") == "parked":
+            error = str(source_entry.get("last_error") or "").strip()
+            if len(error) > 160:
+                error = error[:157] + "..."
+            reason = f" {error}" if error else ""
+            return f"{content_mode_label(source_entry.get('content_mode'))}: parked until source access is fixed.{reason}"
         source_profile = normalize_account_profile(source_entry.get("account_profile"))
         if source_profile != self._active_account_profile():
             return (
@@ -2381,6 +2418,21 @@ class AutomationController:
         source_id = str(source_entry.get("id") or "")
         label = source_entry.get("title") or source_entry.get("source_url") or "source"
         error = str(exc)
+        source_url = str(source_entry.get("source_url") or "")
+        if is_youtube_download_blocker(error, source_url):
+            if source_id and hasattr(self.sources, "defer_source_failure"):
+                try:
+                    self.sources.defer_source_failure(source_id, error)
+                except Exception:
+                    pass
+            message = (
+                f"Source download is blocked by YouTube auth/challenge for {label}. "
+                "Parked in queue; paste the same link again after YouTube cookies or extraction tokens are refreshed."
+            )
+            self.append_log(message)
+            self.notify(f"{message}\nReason: {error[:700]}")
+            return
+
         max_failures = env_int(
             "SOURCE_MAX_FAILURES",
             DEFAULT_SOURCE_MAX_FAILURES,

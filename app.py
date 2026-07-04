@@ -333,6 +333,9 @@ class SourceQueueManager:
                 existing["content_mode"] = content_mode
                 existing["account_profile"] = account_profile
                 existing["audience_language"] = audience_language
+                if str(existing.get("status") or "").strip().lower() == "parked" and account_profile != "future_en":
+                    existing["status"] = ""
+                    existing["last_error"] = ""
                 if title:
                     existing["title"] = title
                 existing["updated_at"] = now
@@ -403,6 +406,23 @@ class SourceQueueManager:
             self._write(data)
             return sources[target_index]
 
+    def defer_source_failure(self, source_id: str, error: str) -> dict[str, Any] | None:
+        with self._lock:
+            data = self._read()
+            sources = data.setdefault("sources", [])
+            target_index = next((index for index, item in enumerate(sources) if item.get("id") == source_id), None)
+            if target_index is None:
+                return None
+
+            target = sources[target_index]
+            target["last_error"] = str(error or "").strip()[:1000]
+            target["updated_at"] = utc_now()
+            target.pop("failed_at", None)
+            target["status"] = "parked"
+            sources[target_index] = self._normalize_entry(target)
+            self._write(data)
+            return sources[target_index]
+
     def clear_source_failure(self, source_id: str) -> dict[str, Any] | None:
         with self._lock:
             data = self._read()
@@ -414,7 +434,7 @@ class SourceQueueManager:
             target = sources[target_index]
             target["download_failures"] = 0
             target["last_error"] = ""
-            if target.get("status") == "failed":
+            if target.get("status") in {"failed", "parked"}:
                 target.pop("failed_at", None)
                 target["status"] = ""
             target["updated_at"] = utc_now()
@@ -474,7 +494,7 @@ class SourceQueueManager:
         remaining = max(0, planned - posted)
         status = "done" if remaining == 0 else ("active" if posted > 0 else "queued")
         stored_status = str(entry.get("status") or "").strip().lower()
-        if stored_status in {"failed", "skipped"}:
+        if stored_status in {"failed", "skipped", "parked"}:
             status = stored_status
         if account_profile == "future_en" and status != "done":
             status = "parked"

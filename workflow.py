@@ -636,7 +636,19 @@ def yt_dlp_error_summary(completed: subprocess.CompletedProcess[str]) -> str:
     combined = "\n".join(part for part in [stderr, stdout] if part).strip()
     if not combined:
         return "yt-dlp failed without an error message."
-    return combined.splitlines()[-1]
+    lines = [line.strip() for line in combined.splitlines() if line.strip()]
+    priority_markers = (
+        "error:",
+        "sign in to confirm",
+        "not a bot",
+        "n challenge",
+        "po token",
+        "requested format is not available",
+        "only images are available",
+    )
+    priority = [line for line in lines if any(marker in line.lower() for marker in priority_markers)]
+    selected = priority[-8:] if priority else lines[-12:]
+    return "\n".join(selected)
 
 
 def is_youtube_bot_error(completed: subprocess.CompletedProcess[str]) -> bool:
