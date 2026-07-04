@@ -28,6 +28,7 @@ DEFAULT_TIKTOK_MAX_PENDING_SHARES = 5
 DEFAULT_UPLOAD_MAX_ATTEMPTS = 4
 DEFAULT_AUTOMATION_INTERVAL_HOURS = 4
 DEFAULT_SOURCE_MAX_FAILURES = 2
+DEFAULT_TIKTOK_PROCESSING_TIMEOUT_HOURS = 2
 DEFAULT_TIKTOK_PUBLIC_USERNAME = "film.box.official"
 TIKTOK_MIN_CHUNK_SIZE = 5 * 1024 * 1024
 TIKTOK_MAX_CHUNK_SIZE = 64 * 1024 * 1024
@@ -1313,6 +1314,12 @@ class AutomationController:
             maximum=DEFAULT_TIKTOK_MAX_PENDING_SHARES,
         )
         self.max_upload_attempts = env_int("TIKTOK_UPLOAD_MAX_ATTEMPTS", DEFAULT_UPLOAD_MAX_ATTEMPTS, minimum=1)
+        self.processing_timeout_hours = env_int(
+            "TIKTOK_PROCESSING_TIMEOUT_HOURS",
+            DEFAULT_TIKTOK_PROCESSING_TIMEOUT_HOURS,
+            minimum=1,
+            maximum=24,
+        )
         self._lock = threading.Lock()
         self._running = threading.Lock()
         self._stop_event = threading.Event()
@@ -1940,6 +1947,27 @@ class AutomationController:
                     )
                     status_updates += 1
             elif remote_status in {"PROCESSING_UPLOAD", "PROCESSING_DOWNLOAD"}:
+                processing_started_at = iso_to_datetime(
+                    str(item.get("created_at") or item.get("updated_at") or "")
+                )
+                processing_timeout = timedelta(hours=self.processing_timeout_hours)
+                if (
+                    processing_started_at is not None
+                    and datetime.now(timezone.utc) - processing_started_at > processing_timeout
+                ):
+                    message = (
+                        f"{item.get('clip_label') or 'generated clip'} stayed in TikTok {remote_status} "
+                        f"for more than {self.processing_timeout_hours} hour(s); marking it stale so the source can continue."
+                    )
+                    self.post_queue.update_item(
+                        str(item.get("id")),
+                        status="failed",
+                        tiktok_status=remote_status,
+                        error=message,
+                    )
+                    self.append_log(message)
+                    self.notify(message)
+                    continue
                 self.post_queue.update_item(
                     str(item.get("id")),
                     status="processing",
