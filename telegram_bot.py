@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 
 YOUTUBE_URL_PATTERN = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s<>()]+", re.IGNORECASE)
 TRUE_VALUES = {"1", "true", "yes", "on"}
-BOT_COMMANDS_VERSION = "2026-07-06.account-routing-v2"
+BOT_COMMANDS_VERSION = "2026-07-06.account-routing-v3"
 BOT_COMMANDS = [
     {"command": "start", "description": "Connect this chat and show help"},
     {"command": "status", "description": "Show automation and inbox counts"},
@@ -27,6 +27,18 @@ BOT_COMMANDS = [
     {"command": "metrics", "description": "Record views likes comments saves shares"},
     {"command": "studio", "description": "Record TikTok Studio watch metrics"},
     {"command": "syncmetrics", "description": "Auto-sync TikTok public video metrics"},
+    {"command": "performance", "description": "Show recent TikTok performance"},
+    {"command": "run", "description": "Start one automation run now"},
+    {"command": "pause", "description": "Pause scheduled runs"},
+    {"command": "resume", "description": "Resume the 4-hour schedule"},
+    {"command": "posted", "description": "Mark oldest inbox video as posted"},
+    {"command": "help", "description": "Show available commands"},
+]
+BOT_COMMANDS_SIMPLE = [
+    {"command": "start", "description": "Connect this chat and show help"},
+    {"command": "status", "description": "Show automation and inbox counts"},
+    {"command": "queue", "description": "Show queued YouTube links and progress"},
+    {"command": "clips", "description": "Show recent clip labels"},
     {"command": "performance", "description": "Show recent TikTok performance"},
     {"command": "run", "description": "Start one automation run now"},
     {"command": "pause", "description": "Pause scheduled runs"},
@@ -81,6 +93,11 @@ def default_account_profile() -> str:
 
 def default_audience_language() -> str:
     return normalize_audience_language("", account_profile=default_account_profile())
+
+
+def simple_link_only_mode() -> bool:
+    value = os.getenv("TELEGRAM_SIMPLE_LINK_ONLY", "").strip().lower()
+    return value in TRUE_VALUES
 
 
 def utc_now() -> str:
@@ -204,7 +221,7 @@ class TelegramBotService:
             bot_token,
             "setMyCommands",
             {
-                "commands": BOT_COMMANDS,
+                "commands": BOT_COMMANDS_SIMPLE if simple_link_only_mode() else BOT_COMMANDS,
                 "scope": {"type": "default"},
             },
         )
@@ -462,6 +479,19 @@ class TelegramBotService:
         return normalize_account_profile(os.getenv("TIKTOK_ACCOUNT_PROFILE", ACCOUNT_PROFILE_MAIN_RU))
 
     def _help_text(self) -> str:
+        if simple_link_only_mode():
+            return (
+                "Send me a YouTube link and I will queue 8 English 60s+ videos from it.\n\n"
+                "/status - current automation counts\n"
+                "/queue - source links and clip progress\n"
+                "/clips - recent clip labels\n"
+                "/performance - recent views and like-rate summary\n"
+                "/run - start a run now\n"
+                "/pause - stop scheduled runs\n"
+                f"/resume - enable {DEFAULT_AUTOMATION_INTERVAL_HOURS}-hour schedule\n"
+                "/posted - mark the oldest inbox video as posted"
+            )
+
         default_profile = default_account_profile()
         default_language = default_audience_language().upper()
         default_target = account_profile_label(default_profile)
