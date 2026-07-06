@@ -84,6 +84,13 @@ CANONICAL_TIKTOK_HASHTAGS = [
     "#recommendations",
     "#\u0440\u0435\u043a\u0438",
 ]
+ENGLISH_TIKTOK_HASHTAGS = [
+    "#fyp",
+    "#movieclips",
+    "#filmclips",
+    "#cinematok",
+    "#relatable",
+]
 CAPTION_EMOJI = "\U0001F609"
 RETRYABLE_ERROR_HINTS = (
     "network error",
@@ -134,6 +141,13 @@ def normalize_tiktok_hashtags(hashtags: list[str] | tuple[str, ...] | None) -> l
             normalized.append(tag)
             seen.add(key)
     return normalized or list(CANONICAL_TIKTOK_HASHTAGS)
+
+
+def hashtags_for_audience_language(value: Any, *, account_profile: Any = None) -> list[str]:
+    language = normalize_audience_language(value, account_profile=account_profile)
+    if language == "en":
+        return list(ENGLISH_TIKTOK_HASHTAGS)
+    return list(CANONICAL_TIKTOK_HASHTAGS)
 
 
 def compact_number(value: int | float) -> str:
@@ -464,6 +478,10 @@ class PostQueueManager:
                     source_entry.get("audience_language"),
                     account_profile=account_profile,
                 )
+                hashtags = normalize_tiktok_hashtags(
+                    source_entry.get("hashtags")
+                    or hashtags_for_audience_language(audience_language, account_profile=account_profile)
+                )
                 items.append(
                     self._normalize_item(
                         {
@@ -481,7 +499,7 @@ class PostQueueManager:
                             "segment_end": segment.get("end_seconds"),
                             "segment_excerpt": segment.get("excerpt") or "",
                             "status": "pending",
-                            "hashtags": list(self.default_hashtags),
+                            "hashtags": hashtags,
                             "created_at": now,
                             "updated_at": now,
                         }
@@ -1400,7 +1418,17 @@ class AutomationController:
             return
 
     def _caption_hint_for_item(self, item: dict[str, Any]) -> str:
-        hashtags = normalize_tiktok_hashtags(item.get("hashtags") or self.post_queue.default_hashtags)
+        account_profile = normalize_account_profile(item.get("account_profile"))
+        audience_language = normalize_audience_language(
+            item.get("audience_language"),
+            account_profile=account_profile,
+        )
+        hashtag_source = (
+            hashtags_for_audience_language(audience_language, account_profile=account_profile)
+            if audience_language == "en"
+            else item.get("hashtags") or self.post_queue.default_hashtags
+        )
+        hashtags = normalize_tiktok_hashtags(hashtag_source)
         hook = (
             self._monetization_caption_hook_for_item(item)
             if normalize_content_mode(item.get("content_mode")) == CONTENT_MODE_MONETIZATION
@@ -1417,6 +1445,36 @@ class AutomationController:
             + str(item.get("clip_label") or "")
             + str(item.get("segment_start") or "")
         )
+        if normalize_audience_language(
+            item.get("audience_language"),
+            account_profile=item.get("account_profile"),
+        ) == "en":
+            hooks = [
+                "Scene breakdown: the real meaning lands near the end \U0001F440",
+                "This moment looks simple, but the last line changes everything \U0001F633",
+                "Watch how the conversation flips in a few seconds \U0001F440",
+                "The scene feels normal until one line makes it awkward \U0001F605",
+                "This is the kind of moment you need to replay \U0001F440",
+            ]
+            if any(token in excerpt_key for token in ("why", "how", "?")):
+                hooks = [
+                    "The question sounds simple, but the answer changes the scene \U0001F633",
+                    "This question makes the whole moment way more interesting \U0001F440",
+                    "One simple question, and suddenly the scene flips \U0001F605",
+                ]
+            elif any(token in excerpt_key for token in ("money", "power", "work", "plan")):
+                hooks = [
+                    "This is where a normal plan starts going wrong \U0001F440",
+                    "The conversation gets serious faster than expected \U0001F633",
+                    "A simple plan turns into a problem real quick \U0001F605",
+                ]
+            elif any(token in excerpt_key for token in ("love", "heart", "feel")):
+                hooks = [
+                    "The silence here says more than the words \U0001F972",
+                    "This moment hits harder than it should \U0001F633",
+                    "The emotions do all the talking here \U0001F440",
+                ]
+            return self._stable_choice(hooks, label_seed + excerpt_key)
         hooks = [
             "Разбор сцены: почему этот момент так цепляет? Досмотри до конца 👀",
             "Сцена выглядит простой, но смысл раскрывается ближе к концу 🫢",
@@ -1452,6 +1510,61 @@ class AutomationController:
             + str(item.get("clip_label") or "")
             + str(item.get("segment_start") or "")
         )
+        if normalize_audience_language(
+            item.get("audience_language"),
+            account_profile=item.get("account_profile"),
+        ) == "en":
+            high_retention_hooks = [
+                "Wait for the last line \U0001F440",
+                "This scene escalates fast \U0001F633",
+                "The timing makes it way too real \U0001F605",
+                "This moment gets awkward so quickly \U0001F440",
+                "The ending makes the whole scene \U0001F633",
+            ]
+            if not excerpt_key:
+                return self._stable_choice(high_retention_hooks, label_seed)
+
+            keyword_hooks = [
+                (
+                    ("why", "how", "?"),
+                    [
+                        "The answer is not what it looks like \U0001F633",
+                        "This question changes the whole scene \U0001F440",
+                    ],
+                ),
+                (
+                    ("wait", "stop"),
+                    [
+                        "This is where the scene gets tense \U0001F633",
+                        "From here, you cannot look away \U0001F440",
+                    ],
+                ),
+                (
+                    ("money", "power", "plan", "work"),
+                    [
+                        "A normal conversation turns serious fast \U0001F633",
+                        "This moment feels way too real \U0001F440",
+                    ],
+                ),
+                (
+                    ("love", "heart", "feel"),
+                    [
+                        "The emotions say more than the words \U0001F972",
+                        "This moment goes straight for the feelings \U0001F633",
+                    ],
+                ),
+                (
+                    ("!", "real", "serious"),
+                    [
+                        "That twist was too clean \U0001F633",
+                        "A moment you instantly want to replay \U0001F440",
+                    ],
+                ),
+            ]
+            for tokens, hooks in keyword_hooks:
+                if any(token in excerpt_key for token in tokens):
+                    return self._stable_choice(hooks, label_seed + excerpt_key)
+            return self._stable_choice(high_retention_hooks, label_seed + excerpt_key)
 
         high_retention_hooks = [
             "Этот диалог надо досмотреть до конца 👀",
@@ -2390,13 +2503,16 @@ class AutomationController:
         profile = content_mode_profile(content_mode)
         clip_duration_sec = int(source_entry.get("clip_duration_sec") or profile["clip_duration_sec"])
         clip_duration_sec = max(60, min(90, clip_duration_sec)) if content_mode == CONTENT_MODE_MONETIZATION else max(10, min(60, clip_duration_sec))
+        hashtags = normalize_tiktok_hashtags(
+            hashtags_for_audience_language(audience_language, account_profile=account_profile)
+        )
         caption_hint = self._caption_hint_for_item(
             {
                 "source_id": source_id,
                 "content_mode": content_mode,
                 "account_profile": account_profile,
                 "audience_language": audience_language,
-                "hashtags": self.post_queue.default_hashtags,
+                "hashtags": hashtags,
             }
         )
         request = {
@@ -2418,7 +2534,7 @@ class AutomationController:
             "add_captions": True,
             "publish_mode": "tiktok_api",
             "rights_confirmed": True,
-            "hashtags": list(self.post_queue.default_hashtags),
+            "hashtags": hashtags,
             "caption_hint": caption_hint,
             "content_mode": content_mode,
             "account_profile": account_profile,

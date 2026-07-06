@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from telegram_bot import TelegramBotService
-from tiktok_automation import AutomationController
+from tiktok_automation import AutomationController, hashtags_for_audience_language
 from workflow import WorkflowPipeline, detect_tools
 
 
@@ -37,6 +37,22 @@ DEFAULT_TIKTOK_HASHTAGS = [
     "#recommendations",
     "#\u0440\u0435\u043a\u0438",
 ]
+
+
+def active_account_profile_value() -> str:
+    text = os.getenv("TIKTOK_ACCOUNT_PROFILE", "main_ru").strip().lower().replace("-", "_")
+    return "future_en" if text in {"future_en", "english", "en", "english_account"} else "main_ru"
+
+
+def active_audience_language_value() -> str:
+    return "en" if active_account_profile_value() == "future_en" else "ru"
+
+
+def default_tiktok_hashtags() -> list[str]:
+    return hashtags_for_audience_language(
+        active_audience_language_value(),
+        account_profile=active_account_profile_value(),
+    )
 
 
 def utc_now() -> str:
@@ -631,7 +647,7 @@ class TikTokAuthManager:
                 "open_id": profile.get("open_id") or tokens.get("open_id"),
             },
             "pending": bool(pending.get("state")),
-            "default_hashtags": list(DEFAULT_TIKTOK_HASHTAGS),
+            "default_hashtags": default_tiktok_hashtags(),
         }
 
     def build_authorize_url(self) -> str:
@@ -1031,7 +1047,7 @@ RUNTIME.apply_environment()
 PIPELINE = WorkflowPipeline(ROOT)
 TIKTOK = TikTokAuthManager(ROOT)
 SOURCES = SourceQueueManager(ROOT)
-AUTOMATION = AutomationController(ROOT, PIPELINE, TIKTOK, SOURCES, DEFAULT_TIKTOK_HASHTAGS)
+AUTOMATION = AutomationController(ROOT, PIPELINE, TIKTOK, SOURCES, default_tiktok_hashtags())
 TELEGRAM = TelegramBotService(ROOT, SOURCES, AUTOMATION)
 AUTOMATION.set_notifier(TELEGRAM.notify)
 
