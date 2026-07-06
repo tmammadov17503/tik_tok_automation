@@ -333,7 +333,10 @@ class SourceQueueManager:
                 existing["content_mode"] = content_mode
                 existing["account_profile"] = account_profile
                 existing["audience_language"] = audience_language
-                if str(existing.get("status") or "").strip().lower() == "parked" and account_profile != "future_en":
+                if (
+                    str(existing.get("status") or "").strip().lower() == "parked"
+                    and account_profile == self.active_account_profile()
+                ):
                     existing["status"] = ""
                     existing["last_error"] = ""
                 if title:
@@ -474,6 +477,12 @@ class SourceQueueManager:
             return "future_en"
         return "main_ru"
 
+    def active_account_profile(self) -> str:
+        return self._normalize_account_profile(os.getenv("TIKTOK_ACCOUNT_PROFILE", "main_ru"))
+
+    def active_audience_language(self) -> str:
+        return "en" if self.active_account_profile() == "future_en" else "ru"
+
     def _normalize_audience_language(self, value: Any, *, account_profile: str) -> str:
         text = str(value or "").strip().lower()
         if text.startswith("en"):
@@ -496,7 +505,7 @@ class SourceQueueManager:
         stored_status = str(entry.get("status") or "").strip().lower()
         if stored_status in {"failed", "skipped", "parked"}:
             status = stored_status
-        if account_profile == "future_en" and status != "done":
+        if account_profile != self.active_account_profile() and status != "done":
             status = "parked"
         return {
             "id": str(entry.get("id") or uuid.uuid4().hex[:10]),
@@ -1083,6 +1092,8 @@ class AppHandler(BaseHTTPRequestHandler):
                         "watermark_removal": "not_supported",
                         "rights_required": True,
                     },
+                    "active_account_profile": SOURCES.active_account_profile(),
+                    "active_audience_language": SOURCES.active_audience_language(),
                 }
             )
             return

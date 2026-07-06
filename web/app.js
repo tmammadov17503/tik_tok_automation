@@ -27,6 +27,8 @@ let pollHandle = null;
 let automationPollHandle = null;
 let tiktokQrPollHandle = null;
 let currentTikTokQrDataUrl = "";
+let activeAccountProfile = "main_ru";
+let activeAudienceLanguage = "ru";
 
 function createStatusPill(name, enabled) {
   const item = document.createElement("div");
@@ -38,10 +40,22 @@ function createStatusPill(name, enabled) {
 async function loadStatus() {
   const response = await fetch("/api/status");
   const data = await response.json();
+  activeAccountProfile = data.active_account_profile || "main_ru";
+  activeAudienceLanguage = data.active_audience_language || (activeAccountProfile === "future_en" ? "en" : "ru");
+  applySourceDefaults();
   statusContainer.innerHTML = "";
   Object.entries(data.tools).forEach(([name, enabled]) => {
     statusContainer.appendChild(createStatusPill(name, enabled));
   });
+}
+
+function applySourceDefaults() {
+  if (!sourceForm) {
+    return;
+  }
+  sourceForm.elements.content_mode.value = "monetization";
+  sourceForm.elements.account_profile.value = activeAccountProfile;
+  sourceForm.elements.audience_language.value = activeAudienceLanguage;
 }
 
 function escapeHtml(value) {
@@ -516,8 +530,8 @@ async function saveSource(event) {
     source_url: sourceForm.elements.source_url.value,
     planned_clips: Number(sourceForm.elements.planned_clips.value || 8),
     content_mode: sourceForm.elements.content_mode.value || "monetization",
-    account_profile: sourceForm.elements.account_profile.value || "main_ru",
-    audience_language: sourceForm.elements.audience_language.value || "ru",
+    account_profile: sourceForm.elements.account_profile.value || activeAccountProfile,
+    audience_language: sourceForm.elements.audience_language.value || activeAudienceLanguage,
     title: sourceForm.elements.title.value,
   };
 
@@ -538,9 +552,7 @@ async function saveSource(event) {
 
   sourceForm.reset();
   sourceForm.elements.planned_clips.value = "8";
-  sourceForm.elements.content_mode.value = "monetization";
-  sourceForm.elements.account_profile.value = "main_ru";
-  sourceForm.elements.audience_language.value = "ru";
+  applySourceDefaults();
   renderSources(data.sources || []);
 }
 

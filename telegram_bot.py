@@ -14,14 +14,14 @@ from urllib.request import Request, urlopen
 
 YOUTUBE_URL_PATTERN = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s<>()]+", re.IGNORECASE)
 TRUE_VALUES = {"1", "true", "yes", "on"}
-BOT_COMMANDS_VERSION = "2026-07-02.account-routing-v1"
+BOT_COMMANDS_VERSION = "2026-07-06.account-routing-v2"
 BOT_COMMANDS = [
     {"command": "start", "description": "Connect this chat and show help"},
     {"command": "status", "description": "Show automation and inbox counts"},
     {"command": "queue", "description": "Show queued YouTube links and progress"},
     {"command": "moneyru", "description": "Queue RU monetization videos for main account"},
-    {"command": "moneyen", "description": "Park EN monetization videos for future account"},
-    {"command": "money", "description": "Alias for /moneyru"},
+    {"command": "moneyen", "description": "Queue EN monetization videos for English account"},
+    {"command": "money", "description": "Queue monetization videos for this bot"},
     {"command": "growth", "description": "Queue normal 30s growth videos"},
     {"command": "clips", "description": "Show recent clip labels for metrics"},
     {"command": "metrics", "description": "Record views likes comments saves shares"},
@@ -69,6 +69,18 @@ def normalize_audience_language(value: Any, *, account_profile: Any = None) -> s
     if text.startswith("ru"):
         return "ru"
     return "en" if normalize_account_profile(account_profile) == ACCOUNT_PROFILE_FUTURE_EN else "ru"
+
+
+def default_account_profile() -> str:
+    return normalize_account_profile(
+        os.getenv("TELEGRAM_DEFAULT_ACCOUNT_PROFILE")
+        or os.getenv("TIKTOK_ACCOUNT_PROFILE")
+        or ACCOUNT_PROFILE_MAIN_RU
+    )
+
+
+def default_audience_language() -> str:
+    return normalize_audience_language("", account_profile=default_account_profile())
 
 
 def utc_now() -> str:
@@ -318,7 +330,22 @@ class TelegramBotService:
             result = self.automation.mark_oldest_inbox_posted()
             self._send_message(token, chat_id, str(result.get("message") or "No update."))
             return
-        if command in {"/money", "/moneyru", "/monetization", "/monetize"}:
+        if command in {"/money", "/monetization", "/monetize"}:
+            urls = [url.rstrip(".,;") for url in YOUTUBE_URL_PATTERN.findall(text)]
+            if not urls:
+                self._send_message(token, chat_id, "Usage: /money https://youtu.be/...  This queues 8 longer 60s+ monetization videos for this bot.")
+                return
+            target_profile = default_account_profile()
+            self._queue_source_urls(
+                token,
+                chat_id,
+                urls,
+                "monetization",
+                account_profile=target_profile,
+                audience_language=normalize_audience_language("", account_profile=target_profile),
+            )
+            return
+        if command in {"/moneyru", "/rumoney"}:
             urls = [url.rstrip(".,;") for url in YOUTUBE_URL_PATTERN.findall(text)]
             if not urls:
                 self._send_message(token, chat_id, "Usage: /moneyru https://youtu.be/...  This queues 8 longer 60s+ RU monetization test videos for the main account.")
@@ -335,7 +362,7 @@ class TelegramBotService:
         if command in {"/moneyen", "/monetizationen", "/englishmoney"}:
             urls = [url.rstrip(".,;") for url in YOUTUBE_URL_PATTERN.findall(text)]
             if not urls:
-                self._send_message(token, chat_id, "Usage: /moneyen https://youtu.be/...  This parks English monetization sources for a future English account.")
+                self._send_message(token, chat_id, "Usage: /moneyen https://youtu.be/...  This queues 8 longer 60s+ English monetization videos for the English account.")
                 return
             self._queue_source_urls(
                 token,
@@ -351,13 +378,14 @@ class TelegramBotService:
             if not urls:
                 self._send_message(token, chat_id, "Usage: /growth https://youtu.be/...  This queues 8 normal 30s growth videos.")
                 return
+            target_profile = default_account_profile()
             self._queue_source_urls(
                 token,
                 chat_id,
                 urls,
                 "growth",
-                account_profile=ACCOUNT_PROFILE_MAIN_RU,
-                audience_language="ru",
+                account_profile=target_profile,
+                audience_language=normalize_audience_language("", account_profile=target_profile),
             )
             return
 
@@ -371,8 +399,8 @@ class TelegramBotService:
             chat_id,
             urls,
             "monetization",
-            account_profile=ACCOUNT_PROFILE_MAIN_RU,
-            audience_language="ru",
+            account_profile=default_account_profile(),
+            audience_language=default_audience_language(),
         )
 
     def _queue_source_urls(
@@ -403,7 +431,7 @@ class TelegramBotService:
                 }
             )
 
-        should_run_on_current_account = normalized_profile == ACCOUNT_PROFILE_MAIN_RU
+        should_run_on_current_account = normalized_profile == self._active_account_profile()
         status = (
             self.automation.ensure_scheduled(interval_hours=DEFAULT_AUTOMATION_INTERVAL_HOURS)
             if should_run_on_current_account
@@ -422,7 +450,7 @@ class TelegramBotService:
         if should_run_on_current_account:
             schedule_note = f"I did not start an immediate run; it will wait for the normal cooldown. Next run: {next_run}."
         else:
-            schedule_note = "Parked only: it will not run on Film Box Official until a separate English account is connected."
+            schedule_note = "Parked only: this source targets a different account profile and will not run on this bot."
         self._send_message(
             token,
             chat_id,
@@ -430,15 +458,21 @@ class TelegramBotService:
             f"{account_note} {schedule_note}",
         )
 
+    def _active_account_profile(self) -> str:
+        return normalize_account_profile(os.getenv("TIKTOK_ACCOUNT_PROFILE", ACCOUNT_PROFILE_MAIN_RU))
+
     def _help_text(self) -> str:
+        default_profile = default_account_profile()
+        default_language = default_audience_language().upper()
+        default_target = account_profile_label(default_profile)
         return (
-            "Send a YouTube link and I will queue 8 longer 60s+ RU monetization videos from it.\n"
-            "Use /moneyru <YouTube link> for the same monetization queue if you want to be explicit.\n"
-            "Use /moneyen <YouTube link> to park English monetization sources for a future English account.\n\n"
+            f"Send a YouTube link and I will queue 8 longer 60s+ monetization videos for {default_target} ({default_language}).\n"
+            "Use /money <YouTube link> for the same default monetization queue if you want to be explicit.\n"
+            "Use /moneyru or /moneyen only when you want to override the target account.\n\n"
             "/status - current automation counts\n"
             "/queue - source links and clip progress\n"
             "/moneyru <link> - queue RU 60s+ monetization videos\n"
-            "/moneyen <link> - park EN 60s+ monetization sources\n"
+            "/moneyen <link> - queue EN 60s+ monetization videos\n"
             "/growth <link> - optional old 30s growth mode\n"
             "/clips - recent clip labels for metrics\n"
             "/metrics [clip] views likes comments saves shares - record TikTok results\n"
