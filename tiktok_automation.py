@@ -510,7 +510,19 @@ class PostQueueManager:
         return None
 
     def active_items(self) -> list[dict[str, Any]]:
-        return [item for item in self.list_items() if item.get("status") in {"uploading", "processing", "sent_to_inbox"}]
+        active: list[dict[str, Any]] = []
+        for item in self.list_items():
+            status = item.get("status")
+            if status in {"uploading", "processing", "sent_to_inbox"}:
+                active.append(item)
+                continue
+            if (
+                status == "failed"
+                and item.get("publish_id")
+                and item.get("tiktok_status") in {"PROCESSING_UPLOAD", "PROCESSING_DOWNLOAD"}
+            ):
+                active.append(item)
+        return active
 
     def remote_pending_count(self) -> int:
         return sum(1 for item in self.list_items() if item.get("status") in REMOTE_TIKTOK_PENDING_STATES)
@@ -1993,6 +2005,8 @@ class AutomationController:
                     )
                     status_updates += 1
             elif remote_status in {"PROCESSING_UPLOAD", "PROCESSING_DOWNLOAD"}:
+                if item.get("status") == "failed":
+                    continue
                 processing_started_at = iso_to_datetime(
                     str(item.get("created_at") or item.get("updated_at") or "")
                 )
