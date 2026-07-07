@@ -86,9 +86,9 @@ CANONICAL_TIKTOK_HASHTAGS = [
     "#\u0440\u0435\u043a\u0438",
 ]
 ENGLISH_TIKTOK_HASHTAGS = [
-    "#fyp",
     "#movieclips",
-    "#filmclips",
+    "#filmnoir",
+    "#classicmovies",
     "#cinematok",
     "#relatable",
 ]
