@@ -2165,14 +2165,16 @@ class AutomationController:
         token_scope = str((self.auth.status() or {}).get("token_scope") or "")
         metric_source = "tiktok_api"
         notes = "Auto-synced from TikTok Display API."
+        public_profile_username = ""
         try:
             if "video.list" in token_scope:
                 videos = self.publisher.list_public_videos(max_count=20)
             else:
                 metric_source = "public_profile"
                 notes = "Auto-synced from public TikTok profile metadata."
+                public_profile_username = os.getenv("TIKTOK_PUBLIC_USERNAME", DEFAULT_TIKTOK_PUBLIC_USERNAME)
                 videos = self.publisher.list_public_profile_videos(
-                    os.getenv("TIKTOK_PUBLIC_USERNAME", DEFAULT_TIKTOK_PUBLIC_USERNAME),
+                    public_profile_username,
                     max_count=50,
                 )
         except Exception as exc:
@@ -2181,6 +2183,13 @@ class AutomationController:
                 self.append_log(f"Auto metrics sync failed: {message}")
             self._write_metrics_sync_state(error=message, matched=0, recorded=0)
             return {"ok": False, "error": message, "matched": 0, "recorded": 0}
+
+        if metric_source == "public_profile":
+            videos = [
+                video
+                for video in videos
+                if self._public_video_matches_username(video, public_profile_username)
+            ]
 
         matches = self._match_public_videos_to_clips(videos)
         recorded = 0
@@ -2219,6 +2228,13 @@ class AutomationController:
         self._notify_metric_breakouts(recorded_metrics)
         self._write_metrics_sync_state(error="", matched=len(matches), recorded=recorded)
         return {"ok": True, "matched": len(matches), "recorded": recorded, "auto_posted": auto_posted}
+
+    def _public_video_matches_username(self, video: dict[str, Any], username: str) -> bool:
+        expected = str(username or "").strip().lstrip("@").casefold()
+        if not expected:
+            return False
+        share_url = str(video.get("share_url") or "").strip().casefold()
+        return f"/@{expected}/" in share_url or share_url.endswith(f"/@{expected}")
 
     def _notify_metric_breakouts(self, metrics: list[dict[str, Any]]) -> None:
         candidates = [
