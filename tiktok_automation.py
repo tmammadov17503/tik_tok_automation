@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import shutil
 import threading
 import time
@@ -91,6 +92,13 @@ ENGLISH_TIKTOK_HASHTAGS = [
     "#cinematok",
     "#relatable",
 ]
+GENERIC_PUBLIC_MATCH_HASHTAGS = {
+    "#fyp",
+    "#relatable",
+    "#recommendations",
+    "#\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438",
+    "#\u0440\u0435\u043a\u0438",
+}
 CAPTION_EMOJI = "\U0001F609"
 RETRYABLE_ERROR_HINTS = (
     "network error",
@@ -2365,8 +2373,12 @@ class AutomationController:
             return None
 
         delta_hours = abs((video_dt - clip_dt).total_seconds()) / 3600.0
-        hashtag_hits = self._public_video_hashtag_hits(video)
-        if delta_hours > 72 and hashtag_hits < 2:
+        hashtag_hits = self._public_video_hashtag_hits(video, clip)
+        specific_hashtag_hits = self._public_video_specific_hashtag_hits(video, clip)
+        if delta_hours > 72:
+            return None
+
+        if specific_hashtag_hits == 0 and hashtag_hits < 3:
             return None
 
         video_duration = safe_float(video.get("duration"), 0.0)
@@ -2375,16 +2387,40 @@ class AutomationController:
             safe_float(clip.get("segment_end"), 0.0) - safe_float(clip.get("segment_start"), 0.0),
         )
         duration_delta = abs(video_duration - clip_duration) if video_duration and clip_duration else 0.0
-        if duration_delta > 12 and hashtag_hits < 2:
+        if duration_delta > 12 and specific_hashtag_hits == 0:
             return None
 
         return delta_hours + (duration_delta * 3.0) - (hashtag_hits * 6.0)
 
-    def _public_video_hashtag_hits(self, video: dict[str, Any]) -> int:
+    def _public_video_hashtags(self, video: dict[str, Any]) -> set[str]:
         description = repair_mojibake(
             str(video.get("video_description") or video.get("title") or "")
         ).casefold()
-        return sum(1 for tag in CANONICAL_TIKTOK_HASHTAGS if tag.casefold() in description)
+        return {tag for tag in re.findall(r"#[0-9a-zA-Z_\u0400-\u04FF]+", description)}
+
+    def _expected_public_match_hashtags(self, clip: dict[str, Any]) -> list[str]:
+        hashtags = normalize_tiktok_hashtags(
+            clip.get("hashtags")
+            or hashtags_for_audience_language(
+                clip.get("audience_language"),
+                account_profile=clip.get("account_profile"),
+            )
+        )
+        return [tag.casefold() for tag in hashtags if tag]
+
+    def _public_video_hashtag_hits(self, video: dict[str, Any], clip: dict[str, Any]) -> int:
+        public_tags = self._public_video_hashtags(video)
+        expected = self._expected_public_match_hashtags(clip)
+        return sum(1 for tag in expected if tag.casefold() in public_tags)
+
+    def _public_video_specific_hashtag_hits(self, video: dict[str, Any], clip: dict[str, Any]) -> int:
+        public_tags = self._public_video_hashtags(video)
+        expected = [
+            tag
+            for tag in self._expected_public_match_hashtags(clip)
+            if tag.casefold() not in GENERIC_PUBLIC_MATCH_HASHTAGS
+        ]
+        return sum(1 for tag in expected if tag.casefold() in public_tags)
 
     def _ordered_sources(self) -> list[dict[str, Any]]:
         active_profile = self._active_account_profile()
