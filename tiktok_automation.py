@@ -1795,7 +1795,8 @@ class AutomationController:
         ready = progress["ready"]
         mode_label = content_mode_label(source_entry.get("content_mode"))
         return (
-            f"{mode_label}: {ready}/{planned} ready, {progress['inbox']} in TikTok inbox, "
+            f"{mode_label}: {ready}/{planned} ready "
+            f"({progress['posted']} posted, {progress['inbox']} in TikTok inbox), "
             f"{progress['queued'] + progress['making']} making/queued, {progress['remaining']} left."
         )
 
@@ -2199,7 +2200,7 @@ class AutomationController:
             if clip.get("status") == "sent_to_inbox":
                 posted_item = dict(clip)
                 posted_item.update(update)
-                self._mark_item_posted(posted_item, "PUBLIC_VIDEO_LIST", notify=False)
+                self._mark_item_posted(posted_item, "PUBLIC_VIDEO_LIST", notify=True)
                 auto_posted += 1
 
             updated_clip = self.post_queue.update_item(str(clip.get("id") or ""), **update) or {**clip, **update}
