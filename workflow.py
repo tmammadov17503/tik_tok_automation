@@ -25,11 +25,16 @@ CAPTION_CHUNK_CHARS = 34
 RENDER_SEEK_PREROLL_SECONDS = 5.0
 VIDEO_OUTPUT_FPS = 25
 SUBTITLE_EMOJIS_ENABLED = False
-ASS_PRIMARY = r"{\1c&H0000E5FF&}"
+ASS_BASE_COLOR = "&H0000E5FF&"
+ASS_ACTIVE_RED_COLOR = "&H000000FF&"
+ASS_PRIMARY = rf"{{\1c{ASS_BASE_COLOR}}}"
 ASS_WHITE = ASS_PRIMARY
 ASS_YELLOW = ASS_PRIMARY
-ASS_RED = ASS_PRIMARY
+ASS_RED = rf"{{\1c{ASS_ACTIVE_RED_COLOR}}}"
+ASS_KARAOKE_COLORS = rf"{{\1c{ASS_ACTIVE_RED_COLOR}\2c{ASS_BASE_COLOR}}}"
 ASS_POP = r"{\fad(70,90)}"
+ASS_LEADING_TAG_PATTERN = re.compile(r"^\{\\[^}]*\}")
+KARAOKE_WORD_PATTERN = re.compile(r"[0-9A-Za-z\u0400-\u04FF']+")
 NON_SPEECH_PATTERN = re.compile(
     r"(?iu)(?:\[(?:музыка|music|аплодисменты|applause|смех|laughter|шум|noise|вздохи?|sighs?|кашель|coughing)\]"
     r"|\((?:музыка|music|аплодисменты|applause|смех|laughter|шум|noise|вздохи?|sighs?|кашель|coughing)\))"
@@ -563,6 +568,73 @@ def ass_text(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", r"\N")
 
 
+def split_leading_ass_tags(text: str) -> tuple[str, str]:
+    prefix = ""
+    rest = text
+    while True:
+        match = ASS_LEADING_TAG_PATTERN.match(rest)
+        if not match:
+            return prefix, rest
+        prefix += match.group(0)
+        rest = rest[match.end() :]
+
+
+def allocate_karaoke_centiseconds(weights: list[float], total_cs: int) -> list[int]:
+    if not weights:
+        return []
+
+    total = max(len(weights), total_cs)
+    weight_sum = sum(weights) or float(len(weights))
+    raw = [(weight / weight_sum) * total for weight in weights]
+    durations = [max(1, int(value)) for value in raw]
+    diff = total - sum(durations)
+
+    if diff > 0:
+        order = sorted(range(len(raw)), key=lambda index: raw[index] - int(raw[index]), reverse=True)
+        for offset in range(diff):
+            durations[order[offset % len(order)]] += 1
+    elif diff < 0:
+        order = sorted(range(len(raw)), key=lambda index: raw[index] - int(raw[index]))
+        remaining = -diff
+        for index in order:
+            if remaining <= 0:
+                break
+            removable = min(remaining, durations[index] - 1)
+            durations[index] -= removable
+            remaining -= removable
+
+    return durations
+
+
+def add_caption_karaoke(text: str, duration: float) -> str:
+    prefix, body = split_leading_ass_tags(text)
+    parts = re.findall(r"\S+\s*|\s+", body)
+    word_indices: list[int] = []
+    weights: list[float] = []
+
+    for index, part in enumerate(parts):
+        match = KARAOKE_WORD_PATTERN.search(part)
+        if not match:
+            continue
+        word_indices.append(index)
+        weights.append(max(1.0, len(match.group(0)) ** 0.82))
+
+    if not word_indices:
+        return text
+
+    total_cs = max(1, int(round(max(0.35, duration) * 100)))
+    durations = allocate_karaoke_centiseconds(weights, total_cs)
+    timing_by_index = dict(zip(word_indices, durations))
+
+    styled_parts = [prefix, ASS_KARAOKE_COLORS]
+    for index, part in enumerate(parts):
+        duration_cs = timing_by_index.get(index)
+        if duration_cs is not None:
+            styled_parts.append(rf"{{\kf{duration_cs}}}")
+        styled_parts.append(part)
+    return "".join(styled_parts)
+
+
 def write_ass_subtitles(target: Path, cues: list[tuple[float, float, str]]) -> None:
     header = [
         "[Script Info]",
@@ -585,11 +657,14 @@ def write_ass_subtitles(target: Path, cues: list[tuple[float, float, str]]) -> N
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
-    events = [
-        f"Dialogue: 0,{seconds_to_ass_time(start)},{seconds_to_ass_time(end)},Default,,0,0,0,,{ass_text(text)}"
-        for start, end, text in cues
-        if end > start
-    ]
+    events = []
+    for start, end, text in cues:
+        if end <= start:
+            continue
+        karaoke_text = add_caption_karaoke(text, end - start)
+        events.append(
+            f"Dialogue: 0,{seconds_to_ass_time(start)},{seconds_to_ass_time(end)},Default,,0,0,0,,{ass_text(karaoke_text)}"
+        )
     target.write_text("\n".join(header + events) + "\n", encoding="utf-8")
 
 
@@ -748,7 +823,6 @@ def decorate_subtitle_text(text: str, line_index: int, language_hint: str) -> st
     if not SUBTITLE_EMOJIS_ENABLED:
         emoji = ""
 
-    clean = add_caption_emphasis(clean, line_index)
     if line_index % 4 == 0 or emoji:
         clean = ASS_POP + clean
 
@@ -2045,10 +2119,7 @@ class WorkflowPipeline:
             (
                 start,
                 end,
-                add_caption_emphasis(
-                    wrap_caption_text(text, max_line_chars=CAPTION_LINE_CHARS, max_lines=CAPTION_MAX_LINES),
-                    index,
-                ),
+                decorate_subtitle_text(text, index, str(request.get("language") or "auto")),
             )
             for index, (start, end, text) in enumerate(cues, start=1)
         ]
