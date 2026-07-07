@@ -1822,16 +1822,22 @@ class WorkflowPipeline:
     def _vertical_filter_chain(self, subtitle_path: Path | None = None) -> str:
         filters = [
             (
-                "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
+                "[0:v]split=2[bgsrc][fgsrc];"
+                "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
                 "crop=1080:1920:(iw-1080)/2:(ih-1920)/2,"
+                "boxblur=luma_radius=36:luma_power=2:chroma_radius=18:chroma_power=1,"
+                "eq=contrast=1.01:saturation=1.08:brightness=-0.025[bg];"
+                "[fgsrc]scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
                 "eq=contrast=1.03:saturation=1.05,"
-                f"unsharp=5:5:0.55:5:5:0.05,fps={VIDEO_OUTPUT_FPS}:start_time=0,"
+                "unsharp=5:5:0.55:5:5:0.05[fg];"
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2,"
+                f"fps={VIDEO_OUTPUT_FPS}:start_time=0,"
                 f"setpts=N/({VIDEO_OUTPUT_FPS}*TB),setsar=1,format=yuv420p"
             )
         ]
         if subtitle_path is not None:
             filters.append(ffmpeg_subtitles_filter(subtitle_path))
-        return ",".join(filters)
+        return ",".join(filters) + "[vout]"
 
     def _build_vertical_render_command(
         self,
@@ -1859,12 +1865,12 @@ class WorkflowPipeline:
             f"{accurate_seek:.3f}",
             "-t",
             f"{max(1.0, segment.duration):.3f}",
-            "-vf",
+            "-filter_complex",
             self._vertical_filter_chain(subtitle_path),
             "-af",
             "asetpts=PTS-STARTPTS,aresample=async=1000:min_hard_comp=0.100:first_pts=0",
             "-map",
-            "0:v:0?",
+            "[vout]",
             "-map",
             "0:a?",
             "-c:v",
