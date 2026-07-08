@@ -1728,13 +1728,7 @@ class WorkflowPipeline:
             segment = clip["segment_obj"]
 
             subtitle_path: Path | None = None
-            subtitle_label = "source"
-
-            if subtitle_entries:
-                fallback_subtitle_path = job_dir / f"{clip_path.stem}.ass"
-                written = self._write_segment_subtitles(subtitle_entries, segment, fallback_subtitle_path)
-                if written:
-                    subtitle_path = fallback_subtitle_path
+            subtitle_label = "audio"
 
             if subtitle_path is None and whisper is not None:
                 subtitle_label = "Whisper"
@@ -1787,6 +1781,13 @@ class WorkflowPipeline:
                 subtitle_label = "OpenAI"
                 subtitle_path = self._transcribe_clip_with_openai(job, clip_path, segment, request, job_dir)
 
+            if subtitle_path is None and subtitle_entries:
+                subtitle_label = "source"
+                fallback_subtitle_path = job_dir / f"{clip_path.stem}.ass"
+                written = self._write_segment_subtitles(subtitle_entries, segment, fallback_subtitle_path)
+                if written:
+                    subtitle_path = fallback_subtitle_path
+
             if subtitle_path is None:
                 subtitle_label = "hook"
                 subtitle_path = self._write_hook_subtitles(job, clip_path, segment, request, job_dir)
@@ -1827,7 +1828,8 @@ class WorkflowPipeline:
                 "crop=1080:1920:(iw-1080)/2:(ih-1920)/2,"
                 "boxblur=luma_radius=36:luma_power=2:chroma_radius=18:chroma_power=1,"
                 "eq=contrast=1.01:saturation=1.08:brightness=-0.025[bg];"
-                "[fgsrc]scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
+                "[fgsrc]scale=w='if(gt(a,1),-2,1080)':h='if(gt(a,1),1180,-2)':flags=lanczos,"
+                "crop=1080:min(ih\\,1920):(iw-1080)/2:(ih-oh)/2,"
                 "eq=contrast=1.03:saturation=1.05,"
                 "unsharp=5:5:0.55:5:5:0.05[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2,"
