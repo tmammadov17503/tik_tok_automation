@@ -349,7 +349,10 @@ def build_story(
 
 
 def _build_library_story(source_entry: dict[str, Any], *, sequence_index: int) -> dict[str, Any]:
-    topic = TOPIC_LIBRARY[(max(1, sequence_index) - 1) % len(TOPIC_LIBRARY)]
+    story_first_topics = [topic for topic in TOPIC_LIBRARY if topic.get("category")]
+    history_topics = [topic for topic in TOPIC_LIBRARY if not topic.get("category")]
+    rotation = story_first_topics + history_topics
+    topic = rotation[(max(1, sequence_index) - 1) % len(rotation)]
     beats = _beats_for_topic(topic)
     return {
         "slug": topic["slug"],
@@ -369,7 +372,7 @@ def _build_ai_story(
     sequence_index: int,
     logger: Callable[[str], None],
 ) -> dict[str, Any] | None:
-    if os.getenv("TIKTOK_AI_STORY_DISCOVERY", "true").strip().lower() in AI_STORY_DISABLED_VALUES:
+    if os.getenv("TIKTOK_AI_STORY_DISCOVERY", "false").strip().lower() in AI_STORY_DISABLED_VALUES:
         return None
     if not os.getenv("OPENAI_API_KEY", "").strip():
         return None
