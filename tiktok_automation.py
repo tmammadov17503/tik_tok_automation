@@ -14,6 +14,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from tiktok_story_short import english_story_mode_enabled, generate_tiktok_story_clip
+
 
 UPLOAD_INIT_URL = "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/"
 STATUS_FETCH_URL = "https://open.tiktokapis.com/v2/post/publish/status/fetch/"
@@ -86,11 +88,11 @@ CANONICAL_TIKTOK_HASHTAGS = [
     "#\u0440\u0435\u043a\u0438",
 ]
 ENGLISH_TIKTOK_HASHTAGS = [
-    "#movieclips",
-    "#filmnoir",
-    "#classicmovies",
-    "#cinematok",
-    "#relatable",
+    "#historytok",
+    "#storytime",
+    "#didyouknow",
+    "#truehistory",
+    "#learnontiktok",
 ]
 GENERIC_PUBLIC_MATCH_HASHTAGS = {
     "#fyp",
@@ -1458,29 +1460,29 @@ class AutomationController:
             account_profile=item.get("account_profile"),
         ) == "en":
             hooks = [
-                "Scene breakdown: the real meaning lands near the end \U0001F440",
-                "This moment looks simple, but the last line changes everything \U0001F633",
-                "Watch how the conversation flips in a few seconds \U0001F440",
-                "The scene feels normal until one line makes it awkward \U0001F605",
-                "This is the kind of moment you need to replay \U0001F440",
+                "History class skipped this part for a reason \U0001F440",
+                "This true story turns darker near the end \U0001F633",
+                "A leader rises, then one betrayal changes everything \U0001F440",
+                "The ending makes the whole story feel unreal \U0001F633",
+                "This is why power never lets change happen quietly \U0001F440",
             ]
-            if any(token in excerpt_key for token in ("why", "how", "?")):
+            if any(token in excerpt_key for token in ("oil", "land", "power", "country")):
                 hooks = [
-                    "The question sounds simple, but the answer changes the scene \U0001F633",
-                    "This question makes the whole moment way more interesting \U0001F440",
-                    "One simple question, and suddenly the scene flips \U0001F605",
+                    "The fight was never just politics. It was power \U0001F440",
+                    "The resource behind this story explains the betrayal \U0001F633",
+                    "Once money entered the room, the ending was brutal \U0001F440",
                 ]
-            elif any(token in excerpt_key for token in ("money", "power", "work", "plan")):
+            elif any(token in excerpt_key for token in ("coup", "betrayal", "removed", "killed", "silenced")):
                 hooks = [
-                    "This is where a normal plan starts going wrong \U0001F440",
-                    "The conversation gets serious faster than expected \U0001F633",
-                    "A simple plan turns into a problem real quick \U0001F605",
+                    "The betrayal is the part that still feels insane \U0001F633",
+                    "This is where the story stops being politics \U0001F440",
+                    "The fall happens fast, but the damage lasts for years \U0001F633",
                 ]
-            elif any(token in excerpt_key for token in ("love", "heart", "feel")):
+            elif any(token in excerpt_key for token in ("freedom", "independence", "revolution")):
                 hooks = [
-                    "The silence here says more than the words \U0001F972",
-                    "This moment hits harder than it should \U0001F633",
-                    "The emotions do all the talking here \U0001F440",
+                    "Freedom sounded close. Then power answered back \U0001F440",
+                    "The dream was huge, but the backlash came faster \U0001F633",
+                    "This story explains why revolutions get dangerous \U0001F440",
                 ]
             return self._stable_choice(hooks, label_seed + excerpt_key)
         hooks = [
@@ -2543,16 +2545,47 @@ class AutomationController:
         if remaining <= 0:
             return
 
-        cache_dir = self._source_cache_dir(source_id)
-        cached_source = self._cached_source_path(source_id)
-        source_url = str(source_entry.get("source_url") or "")
-        excluded_segments = self._used_segments_for_source(source_id)
         content_mode = normalize_content_mode(source_entry.get("content_mode"))
         account_profile = normalize_account_profile(source_entry.get("account_profile"))
         audience_language = normalize_audience_language(
             source_entry.get("audience_language"),
             account_profile=account_profile,
         )
+
+        if english_story_mode_enabled(source_entry):
+            sequence_index = posted + pending_count + 1
+            job = AutomationJobProxy(self, source_entry)
+            self.notify(
+                f"Generating original English monetization story {sequence_index}/{planned} "
+                f"from the Agent Proof Lab Shorts format. {self.source_progress_line(source_id)}"
+            )
+            try:
+                story_result = generate_tiktok_story_clip(
+                    self.root,
+                    source_entry,
+                    sequence_index=sequence_index,
+                    logger=job.log,
+                )
+            except Exception as exc:
+                self._record_source_generation_failure(source_entry, exc)
+                return
+            request = {
+                "source_queue_id": source_id,
+                "source_original_url": str(source_entry.get("source_url") or ""),
+                "source_value": str(source_entry.get("source_url") or ""),
+                "content_mode": CONTENT_MODE_MONETIZATION,
+                "account_profile": account_profile,
+                "audience_language": audience_language,
+                "publish_mode": "tiktok_api",
+                "caption_hint": story_result.topic.get("hook") or "",
+            }
+            self.on_workflow_completed(request, story_result.output_dir)
+            return
+
+        cache_dir = self._source_cache_dir(source_id)
+        cached_source = self._cached_source_path(source_id)
+        source_url = str(source_entry.get("source_url") or "")
+        excluded_segments = self._used_segments_for_source(source_id)
         profile = content_mode_profile(content_mode)
         clip_duration_sec = int(source_entry.get("clip_duration_sec") or profile["clip_duration_sec"])
         clip_duration_sec = max(60, min(90, clip_duration_sec)) if content_mode == CONTENT_MODE_MONETIZATION else max(10, min(60, clip_duration_sec))
