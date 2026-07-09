@@ -28,6 +28,17 @@ RED = "0xff4d5e"
 WHITE = "white"
 MUTED = "0xd8dde5"
 
+AI_STORY_DISABLED_VALUES = {"0", "false", "no", "off"}
+GENRE_ROTATION = [
+    "eerie historical mystery",
+    "forgotten disaster story",
+    "folklore horror legend",
+    "ancient mystery",
+    "strange true history",
+    "survival story",
+    "lost place mystery",
+    "dark biography",
+]
 
 TOPIC_LIBRARY: list[dict[str, str]] = [
     {
@@ -142,6 +153,96 @@ TOPIC_LIBRARY: list[dict[str, str]] = [
         "aftermath": "her story survived as a warning about who gets punished for uniting people",
         "hook": "A young woman tried to reunite a broken kingdom. The powerful treated that as a threat.",
     },
+    {
+        "slug": "mary-celeste-1872",
+        "short_title": "THE EMPTY SHIP",
+        "title": "The Ship Found Sailing With Nobody On Board",
+        "figure": "the Mary Celeste",
+        "role": "a merchant ship crossing the Atlantic",
+        "year": "1872",
+        "place": "the Atlantic Ocean",
+        "mission": "it was supposed to carry cargo safely across the sea",
+        "pressure": "when another crew found it drifting, food, cargo, and personal items were still there",
+        "turn": "the lifeboat was gone, but the people were never found",
+        "aftermath": "the missing crew turned a normal voyage into one of the ocean's strangest mysteries",
+        "hook": "A ship was found moving across the ocean. Everything was there except the people.",
+        "category": "historical mystery",
+    },
+    {
+        "slug": "dyatlov-pass-1959",
+        "short_title": "THE TENT WAS CUT",
+        "title": "The Hikers Who Fled Their Own Tent",
+        "figure": "the Dyatlov Pass hikers",
+        "role": "a student hiking group in the Ural Mountains",
+        "year": "1959",
+        "place": "the Ural Mountains",
+        "mission": "they set out for a hard winter trek and expected to return as heroes",
+        "pressure": "searchers later found their tent cut open from the inside",
+        "turn": "the group had run into freezing darkness without proper gear",
+        "aftermath": "every theory still has a missing piece, which is why the case never fully leaves people alone",
+        "hook": "Nine hikers entered the mountains. Their tent was found cut open from the inside.",
+        "category": "survival mystery",
+    },
+    {
+        "slug": "flannan-isles-1900",
+        "short_title": "THE EMPTY LIGHTHOUSE",
+        "title": "The Lighthouse Keepers Who Vanished",
+        "figure": "three Flannan Isles keepers",
+        "role": "lighthouse keepers on a remote island",
+        "year": "1900",
+        "place": "the Flannan Isles",
+        "mission": "they kept a lonely light burning for ships in dangerous water",
+        "pressure": "a relief crew arrived to find the lighthouse empty, with no one answering",
+        "turn": "the men were gone, and the island gave almost no clear explanation",
+        "aftermath": "the missing keepers became a perfect ghost story because the silence did most of the work",
+        "hook": "A ship came to replace three lighthouse keepers. The light was there. The men were not.",
+        "category": "lost place mystery",
+    },
+    {
+        "slug": "dancing-plague-1518",
+        "short_title": "THE TOWN THAT DANCED",
+        "title": "The Town That Could Not Stop Dancing",
+        "figure": "the dancers of Strasbourg",
+        "role": "ordinary townspeople caught in a strange outbreak",
+        "year": "1518",
+        "place": "Strasbourg",
+        "mission": "one woman began dancing in the street, and nobody expected it to spread",
+        "pressure": "more people joined until the town treated the dancing like a public crisis",
+        "turn": "leaders tried to solve it by giving the dancers more space and music",
+        "aftermath": "the event still feels unreal because fear, stress, and belief may have moved bodies like a command",
+        "hook": "One woman started dancing in the street. Then an entire town could not look away.",
+        "category": "strange true history",
+    },
+    {
+        "slug": "bell-witch-1817",
+        "short_title": "THE VOICE IN THE HOUSE",
+        "title": "The Family Haunted By A Voice",
+        "figure": "the Bell Witch legend",
+        "role": "a Tennessee folklore story about a family and a voice",
+        "year": "1817",
+        "place": "Tennessee",
+        "mission": "the family wanted a normal home life on the frontier",
+        "pressure": "legend says knocks, whispers, and a strange voice began turning the house into a spectacle",
+        "turn": "visitors came to hear it, and the story grew beyond the family itself",
+        "aftermath": "whether you believe it or not, the legend survived because the scariest part was invisible",
+        "hook": "A family said something was speaking inside their house. The voice became an American legend.",
+        "category": "folklore horror",
+    },
+    {
+        "slug": "tamam-shud-1948",
+        "short_title": "THE CODE IN HIS POCKET",
+        "title": "The Man Nobody Could Identify",
+        "figure": "the Somerton Man",
+        "role": "an unidentified man found near an Australian beach",
+        "year": "1948",
+        "place": "Adelaide, Australia",
+        "mission": "he arrived with no clear identity, no obvious story, and no easy trail",
+        "pressure": "investigators found a tiny scrap with the words Tamam Shud hidden in his clothing",
+        "turn": "a rare book, possible code, and missing labels made the case feel designed to confuse people",
+        "aftermath": "even with later clues, the mystery stayed famous because the setup sounded like fiction",
+        "hook": "A man was found by the beach with a secret phrase hidden in his clothes.",
+        "category": "historical mystery",
+    },
 ]
 
 
@@ -172,7 +273,8 @@ def generate_tiktok_story_clip(
     sequence_index: int,
     logger: Callable[[str], None] | None = None,
 ) -> StoryClipResult:
-    story = build_story(source_entry, sequence_index=sequence_index)
+    log = logger or (lambda message: None)
+    story = build_story(source_entry, sequence_index=sequence_index, logger=log)
     source_id = str(source_entry.get("id") or "source")
     output_dir = root / "output" / "story_reels" / _safe_name(source_id) / f"{_timestamp()}-{sequence_index:02d}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -188,7 +290,6 @@ def generate_tiktok_story_clip(
     story_path.write_text(json.dumps(story, indent=2), encoding="utf-8")
     script_path.write_text(_script_text(story), encoding="utf-8")
 
-    log = logger or (lambda message: None)
     log(f"Generating original English story voiceover: {story['title']}.")
     _generate_openai_voiceover(story_narration_text(story), voiceover_path, logger=log)
     render_story_video(story, voiceover_path, video_path, poster_path, logger=log)
@@ -211,6 +312,8 @@ def generate_tiktok_story_clip(
         "title": story["title"],
         "short_title": story["short_title"],
         "topic_slug": story["slug"],
+        "story_source": story.get("story_source") or "library",
+        "category": story.get("category") or "",
         "caption_style": "lower_karaoke_phrase_captions_red_words",
         "poster_style": "thumbnail_safe_final_outro",
         "thumbnail_outro_seconds": THUMBNAIL_OUTRO_SECONDS,
@@ -232,7 +335,20 @@ def generate_tiktok_story_clip(
     )
 
 
-def build_story(source_entry: dict[str, Any], *, sequence_index: int) -> dict[str, Any]:
+def build_story(
+    source_entry: dict[str, Any],
+    *,
+    sequence_index: int,
+    logger: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    log = logger or (lambda message: None)
+    ai_story = _build_ai_story(source_entry, sequence_index=sequence_index, logger=log)
+    if ai_story is not None:
+        return ai_story
+    return _build_library_story(source_entry, sequence_index=sequence_index)
+
+
+def _build_library_story(source_entry: dict[str, Any], *, sequence_index: int) -> dict[str, Any]:
     topic = TOPIC_LIBRARY[(max(1, sequence_index) - 1) % len(TOPIC_LIBRARY)]
     beats = _beats_for_topic(topic)
     return {
@@ -240,10 +356,143 @@ def build_story(source_entry: dict[str, Any], *, sequence_index: int) -> dict[st
         "title": topic["title"],
         "short_title": topic["short_title"],
         "hook": topic["hook"],
-        "category": "true history story",
+        "category": topic.get("category") or "true history story",
         "source_url": str(source_entry.get("source_url") or ""),
+        "story_source": "library",
         "beats": beats,
     }
+
+
+def _build_ai_story(
+    source_entry: dict[str, Any],
+    *,
+    sequence_index: int,
+    logger: Callable[[str], None],
+) -> dict[str, Any] | None:
+    if os.getenv("TIKTOK_AI_STORY_DISCOVERY", "true").strip().lower() in AI_STORY_DISABLED_VALUES:
+        return None
+    if not os.getenv("OPENAI_API_KEY", "").strip():
+        return None
+
+    genre = GENRE_ROTATION[(max(1, sequence_index) - 1) % len(GENRE_ROTATION)]
+    try:
+        payload = _request_ai_story_payload(source_entry, sequence_index=sequence_index, genre=genre)
+        story = _normalize_ai_story(payload, source_entry=source_entry, sequence_index=sequence_index, genre=genre)
+    except Exception as exc:
+        logger(f"AI story discovery failed, using fallback library: {exc}")
+        return None
+
+    logger(f"AI picked {story['category']}: {story['title']}.")
+    return story
+
+
+def _request_ai_story_payload(source_entry: dict[str, Any], *, sequence_index: int, genre: str) -> dict[str, Any]:
+    from openai import OpenAI
+
+    client = OpenAI()
+    model = os.getenv("OPENAI_STORY_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+    prompt = _ai_story_prompt(source_entry, sequence_index=sequence_index, genre=genre)
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You create short, original, monetization-safe English TikTok story scripts. "
+                    "Return strict JSON only. Avoid copyrighted fiction, explicit gore, current-news claims, "
+                    "and unsupported accusations. For horror, frame the story as folklore, legend, or mystery."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.85,
+    )
+    content = str(completion.choices[0].message.content or "").strip()
+    return _json_from_text(content)
+
+
+def _ai_story_prompt(source_entry: dict[str, Any], *, sequence_index: int, genre: str) -> str:
+    source_title = str(source_entry.get("title") or "").strip()
+    source_hint = f"Current batch title: {source_title}." if source_title else "No user source was provided."
+    previous_topics = ", ".join(topic["title"] for topic in TOPIC_LIBRARY[:8])
+    return (
+        f"Create one fresh vertical short story for English TikTok monetization.\n"
+        f"Slot: {sequence_index}. Genre lane: {genre}. {source_hint}\n"
+        "Rotate across true history, historical mysteries, eerie folklore, unsolved disappearances, strange events, "
+        "survival stories, ancient mysteries, lost places, and dark biographies.\n"
+        f"Do not reuse these fallback examples directly: {previous_topics}.\n"
+        "Requirements:\n"
+        "- 8 beats exactly.\n"
+        "- Each beat narration is 16 to 27 spoken words, simple and punchy.\n"
+        "- Total script should feel like a 60 to 75 second story.\n"
+        "- Start with a curiosity hook, then setup, pressure, turn, consequence, final sting.\n"
+        "- Use public-domain historical/folklore subject matter, no franchise characters, no graphic gore.\n"
+        "- Onscreen text must be 2 to 5 words, bold, emotional, and safe for TikTok.\n"
+        "Return JSON with keys: slug, title, short_title, hook, category, beats. "
+        "beats is an array of objects with label, narration, onscreen_text."
+    )
+
+
+def _normalize_ai_story(
+    payload: dict[str, Any],
+    *,
+    source_entry: dict[str, Any],
+    sequence_index: int,
+    genre: str,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("AI story payload was not a JSON object.")
+
+    raw_beats = payload.get("beats")
+    if not isinstance(raw_beats, list) or len(raw_beats) < 8:
+        raise ValueError("AI story payload did not include 8 beats.")
+
+    beats: list[dict[str, str]] = []
+    for index, raw_beat in enumerate(raw_beats[:8], start=1):
+        if not isinstance(raw_beat, dict):
+            continue
+        narration = _clean(raw_beat.get("narration"))
+        onscreen = _clean(raw_beat.get("onscreen_text") or raw_beat.get("text"))
+        label = _clean(raw_beat.get("label") or f"Beat {index}")
+        if not narration or not onscreen:
+            continue
+        beats.append(
+            {
+                "label": _one_line(label, 28),
+                "narration": narration,
+                "onscreen_text": _one_line(onscreen.upper(), 28),
+            }
+        )
+    if len(beats) < 8:
+        raise ValueError("AI story beats were incomplete after normalization.")
+
+    title = _clean(payload.get("title")) or f"English Story {sequence_index}"
+    short_title = _clean(payload.get("short_title")) or title
+    hook = _clean(payload.get("hook")) or beats[0]["narration"]
+    category = _clean(payload.get("category")) or genre
+    slug = _safe_name(_clean(payload.get("slug")) or f"{genre}-{sequence_index}").lower()
+    return {
+        "slug": slug,
+        "title": _one_line(title, 72),
+        "short_title": _one_line(short_title.upper(), 28),
+        "hook": hook,
+        "category": category,
+        "source_url": str(source_entry.get("source_url") or ""),
+        "story_source": "openai_story_discovery",
+        "beats": beats,
+    }
+
+
+def _json_from_text(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    payload = json.loads(cleaned)
+    if not isinstance(payload, dict):
+        raise ValueError("AI story response was not a JSON object.")
+    return payload
 
 
 def render_story_video(

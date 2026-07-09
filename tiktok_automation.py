@@ -88,12 +88,14 @@ CANONICAL_TIKTOK_HASHTAGS = [
     "#\u0440\u0435\u043a\u0438",
 ]
 ENGLISH_TIKTOK_HASHTAGS = [
-    "#historytok",
     "#storytime",
+    "#historytok",
+    "#mysterytok",
     "#didyouknow",
-    "#truehistory",
     "#learnontiktok",
 ]
+AUTONOMOUS_ENGLISH_SOURCE_URL = "story://autonomous-english-reels"
+AUTONOMOUS_ENGLISH_SOURCE_TITLE = "Autonomous English Story Batch"
 GENERIC_PUBLIC_MATCH_HASHTAGS = {
     "#fyp",
     "#relatable",
@@ -1460,11 +1462,11 @@ class AutomationController:
             account_profile=item.get("account_profile"),
         ) == "en":
             hooks = [
-                "History class skipped this part for a reason \U0001F440",
-                "This true story turns darker near the end \U0001F633",
-                "A leader rises, then one betrayal changes everything \U0001F440",
-                "The ending makes the whole story feel unreal \U0001F633",
-                "This is why power never lets change happen quietly \U0001F440",
+                "This story starts normal, then gets seriously strange \U0001F440",
+                "The ending makes the whole thing feel unreal \U0001F633",
+                "One small detail changes the entire story \U0001F440",
+                "This sounds fake until you hear what happened next \U0001F633",
+                "The last part is the reason this story still spreads \U0001F440",
             ]
             if any(token in excerpt_key for token in ("oil", "land", "power", "country")):
                 hooks = [
@@ -1483,6 +1485,18 @@ class AutomationController:
                     "Freedom sounded close. Then power answered back \U0001F440",
                     "The dream was huge, but the backlash came faster \U0001F633",
                     "This story explains why revolutions get dangerous \U0001F440",
+                ]
+            elif any(token in excerpt_key for token in ("ghost", "legend", "voice", "haunted", "folklore")):
+                hooks = [
+                    "This legend works because the scariest part is invisible \U0001F633",
+                    "People still argue about what really happened here \U0001F440",
+                    "This folklore story gets creepier the longer you sit with it \U0001F633",
+                ]
+            elif any(token in excerpt_key for token in ("missing", "vanished", "empty", "found", "mystery", "unidentified")):
+                hooks = [
+                    "The missing detail is what makes this story impossible to ignore \U0001F440",
+                    "Everything looks normal until one thing is gone \U0001F633",
+                    "This mystery still feels like a scene from a movie \U0001F440",
                 ]
             return self._stable_choice(hooks, label_seed + excerpt_key)
         hooks = [
@@ -2426,12 +2440,17 @@ class AutomationController:
 
     def _ordered_sources(self) -> list[dict[str, Any]]:
         active_profile = self._active_account_profile()
+        sources = [
+            source
+            for source in self.sources.list_sources()
+            if normalize_account_profile(source.get("account_profile")) == active_profile
+        ]
+        if not sources:
+            created = self._maybe_create_autonomous_english_source()
+            if created is not None:
+                sources = [created]
         return sorted(
-            [
-                source
-                for source in self.sources.list_sources()
-                if normalize_account_profile(source.get("account_profile")) == active_profile
-            ],
+            sources,
             key=lambda item: (
                 str(item.get("added_at") or ""),
                 str(item.get("id") or ""),
@@ -2440,6 +2459,64 @@ class AutomationController:
 
     def _active_account_profile(self) -> str:
         return normalize_account_profile(os.getenv("TIKTOK_ACCOUNT_PROFILE", ACCOUNT_PROFILE_MAIN_RU))
+
+    def _autonomous_english_enabled(self) -> bool:
+        value = os.getenv("TIKTOK_AUTONOMOUS_ENGLISH_STORIES", "true").strip().lower()
+        return value not in {"0", "false", "no", "off"} and self._active_account_profile() == ACCOUNT_PROFILE_FUTURE_EN
+
+    def _english_has_unfinished_queue_items(self) -> bool:
+        return any(
+            normalize_account_profile(item.get("account_profile")) == ACCOUNT_PROFILE_FUTURE_EN
+            and item.get("status") in UPLOAD_ACTIVE_STATES
+            for item in self.post_queue.list_items()
+        )
+
+    def _maybe_create_autonomous_english_source(self) -> dict[str, Any] | None:
+        if not self._autonomous_english_enabled():
+            return None
+        if self._english_has_unfinished_queue_items():
+            return None
+        if not hasattr(self.sources, "add_source"):
+            return None
+
+        planned_clips = int(MODE_PROFILES[CONTENT_MODE_MONETIZATION]["default_planned_clips"])
+        batch_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        batch_url = f"{AUTONOMOUS_ENGLISH_SOURCE_URL}/{batch_stamp}"
+        batch_title = f"{AUTONOMOUS_ENGLISH_SOURCE_TITLE} {batch_stamp}"
+        try:
+            self.sources.add_source(
+                {
+                    "source_url": batch_url,
+                    "title": batch_title,
+                    "planned_clips": planned_clips,
+                    "content_mode": CONTENT_MODE_MONETIZATION,
+                    "account_profile": ACCOUNT_PROFILE_FUTURE_EN,
+                    "audience_language": "en",
+                }
+            )
+        except Exception as exc:
+            self.append_log(f"Could not create autonomous English story batch: {exc}")
+            return None
+
+        created = next(
+            (
+                source
+                for source in self.sources.list_sources()
+                if str(source.get("source_url") or "").strip() == batch_url
+                and normalize_account_profile(source.get("account_profile")) == ACCOUNT_PROFILE_FUTURE_EN
+                and normalize_content_mode(source.get("content_mode")) == CONTENT_MODE_MONETIZATION
+            ),
+            None,
+        )
+        if created is None:
+            return None
+
+        self.append_log("Created autonomous English story batch; no pasted link required.")
+        self.notify(
+            "Created an autonomous English story batch. I will pick story, history, mystery, and folklore topics myself "
+            f"and make {planned_clips} monetization videos."
+        )
+        return created
 
     def _source_quality_snapshot(self, source_entry: dict[str, Any]) -> dict[str, Any]:
         source_id = str(source_entry.get("id") or "")

@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 
 YOUTUBE_URL_PATTERN = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s<>()]+", re.IGNORECASE)
 TRUE_VALUES = {"1", "true", "yes", "on"}
-BOT_COMMANDS_VERSION = "2026-07-06.account-routing-v3"
+BOT_COMMANDS_VERSION = "2026-07-09.autonomous-english-stories"
 BOT_COMMANDS = [
     {"command": "start", "description": "Connect this chat and show help"},
     {"command": "status", "description": "Show automation and inbox counts"},
@@ -37,10 +37,10 @@ BOT_COMMANDS = [
 BOT_COMMANDS_SIMPLE = [
     {"command": "start", "description": "Connect this chat and show help"},
     {"command": "status", "description": "Show automation and inbox counts"},
-    {"command": "queue", "description": "Show queued YouTube links and progress"},
+    {"command": "queue", "description": "Show autonomous story batch progress"},
     {"command": "clips", "description": "Show recent clip labels"},
     {"command": "performance", "description": "Show recent TikTok performance"},
-    {"command": "run", "description": "Start one automation run now"},
+    {"command": "run", "description": "Start or continue the story cycle now"},
     {"command": "pause", "description": "Pause scheduled runs"},
     {"command": "resume", "description": "Resume the 4-hour schedule"},
     {"command": "posted", "description": "Mark oldest inbox video as posted"},
@@ -408,6 +408,13 @@ class TelegramBotService:
 
         urls = [url.rstrip(".,;") for url in YOUTUBE_URL_PATTERN.findall(text)]
         if not urls:
+            if simple_link_only_mode():
+                self._send_message(
+                    token,
+                    chat_id,
+                    "No link needed now. I pick English story topics automatically. Use /run to start or continue the story cycle, or /status and /queue.",
+                )
+                return
             self._send_message(token, chat_id, "Send me a YouTube link to queue monetization videos, or use /status and /queue.")
             return
 
@@ -481,12 +488,13 @@ class TelegramBotService:
     def _help_text(self) -> str:
         if simple_link_only_mode():
             return (
-                "Send me a YouTube link and I will queue 8 English 60s+ videos from it.\n\n"
+                "English story mode is autonomous now: no link is required.\n"
+                "I pick story, history, mystery, horror folklore, and strange-event topics myself, then make 8 English 60s+ monetization videos per batch.\n\n"
                 "/status - current automation counts\n"
-                "/queue - source links and clip progress\n"
+                "/queue - autonomous batch and clip progress\n"
                 "/clips - recent clip labels\n"
                 "/performance - recent views and like-rate summary\n"
-                "/run - start a run now\n"
+                "/run - start or continue the story cycle now\n"
                 "/pause - stop scheduled runs\n"
                 f"/resume - enable {DEFAULT_AUTOMATION_INTERVAL_HOURS}-hour schedule\n"
                 "/posted - mark the oldest inbox video as posted"
