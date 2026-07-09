@@ -1798,6 +1798,8 @@ class AutomationController:
         source_entry = progress.get("source")
         if source_entry is None:
             return "Source complete."
+        if self._is_english_story_source(source_entry):
+            return self._english_story_source_line(source_entry)
         if source_entry.get("status") in {"failed", "skipped"}:
             error = str(source_entry.get("last_error") or "source failed").strip()
             if len(error) > 160:
@@ -1822,6 +1824,49 @@ class AutomationController:
             f"{mode_label}: {ready}/{planned} ready "
             f"({progress['posted']} posted, {progress['inbox']} in TikTok inbox), "
             f"{progress['queued'] + progress['making']} making/queued, {progress['remaining']} left."
+        )
+
+    def _is_english_story_source(self, source_entry: dict[str, Any] | None) -> bool:
+        if not source_entry:
+            return False
+        source_url = str(source_entry.get("source_url") or "")
+        return (
+            source_url.startswith(AUTONOMOUS_ENGLISH_SOURCE_URL)
+            or english_story_mode_enabled(source_entry)
+        )
+
+    def _is_english_story_item(self, item: dict[str, Any]) -> bool:
+        source_url = str(item.get("source_url") or "")
+        source_title = str(item.get("source_title") or "")
+        return (
+            source_url.startswith(AUTONOMOUS_ENGLISH_SOURCE_URL)
+            or source_title.startswith(AUTONOMOUS_ENGLISH_SOURCE_TITLE)
+            or (
+                normalize_account_profile(item.get("account_profile")) == ACCOUNT_PROFILE_FUTURE_EN
+                and normalize_content_mode(item.get("content_mode")) == CONTENT_MODE_MONETIZATION
+                and normalize_audience_language(item.get("audience_language"), account_profile=item.get("account_profile")) == "en"
+            )
+        )
+
+    def _english_story_source_line(self, source_entry: dict[str, Any]) -> str:
+        status = str(source_entry.get("status") or "").strip().lower()
+        if status in {"failed", "skipped"}:
+            return "English story batch skipped after a generation issue; the next cycle will start fresh."
+        if status == "parked":
+            return "English story batch is paused until the account is ready."
+        return "English story batch is active. New story videos will be sent to the TikTok inbox."
+
+    def _upload_delivery_message(self, item: dict[str, Any], mode_label: str) -> str:
+        label = item.get("clip_label") or "generated clip"
+        if self._is_english_story_item(item):
+            return (
+                f"English story video sent to TikTok inbox: {label}.\n"
+                f"{self._caption_paste_message(item)}"
+            )
+        return (
+            f"{mode_label} video sent to TikTok inbox: {label}. "
+            f"{self.source_progress_line(str(item.get('source_id') or ''))}\n"
+            f"{self._caption_paste_message(item)}"
         )
 
     def mark_oldest_inbox_posted(self) -> dict[str, Any]:
@@ -1966,10 +2011,13 @@ class AutomationController:
         self.append_log(
             f"Queued {len(clip_paths)} {mode_label.lower()} clip(s) from {source_entry.get('title') or source_url} for TikTok upload."
         )
-        self.notify(
-            f"Created {len(clip_paths)} {mode_label.lower()} video(s) {caption_note} from {source_entry.get('title') or source_url}. "
-            f"{self.source_progress_line(str(source_entry.get('id') or ''))}"
-        )
+        if self._is_english_story_source(source_entry):
+            self.notify(f"Created a new English story video {caption_note}. Uploading it to the TikTok inbox now.")
+        else:
+            self.notify(
+                f"Created {len(clip_paths)} {mode_label.lower()} video(s) {caption_note} from {source_entry.get('title') or source_url}. "
+                f"{self.source_progress_line(str(source_entry.get('id') or ''))}"
+            )
 
     def _read_segments_for_output(self, output_dir: Path) -> list[dict[str, Any]]:
         try:
@@ -2136,11 +2184,7 @@ class AutomationController:
                 )
                 if not was_already_delivered:
                     mode_label = content_mode_label(item.get("content_mode"))
-                    self.notify(
-                        f"{mode_label} video sent to TikTok inbox: {item.get('clip_label') or 'generated clip'}. "
-                        f"{self.source_progress_line(str(item.get('source_id') or ''))}\n"
-                        f"{self._caption_paste_message(item)}"
-                    )
+                    self.notify(self._upload_delivery_message(item, mode_label))
                     status_updates += 1
             elif remote_status in {"PROCESSING_UPLOAD", "PROCESSING_DOWNLOAD"}:
                 if item.get("status") == "failed":
@@ -2632,10 +2676,7 @@ class AutomationController:
         if english_story_mode_enabled(source_entry):
             sequence_index = posted + pending_count + 1
             job = AutomationJobProxy(self, source_entry)
-            self.notify(
-                f"Generating original English monetization story {sequence_index}/{planned} "
-                f"from the Agent Proof Lab Shorts format. {self.source_progress_line(source_id)}"
-            )
+            self.notify("Generating a new English story video for the TikTok inbox.")
             try:
                 story_result = generate_tiktok_story_clip(
                     self.root,
@@ -2755,6 +2796,8 @@ class AutomationController:
             minimum=1,
             maximum=5,
         )
+        if english_story_mode_enabled(source_entry):
+            max_failures = max(max_failures, 3)
         updated = None
         if source_id and hasattr(self.sources, "mark_source_failure"):
             try:
@@ -2863,11 +2906,7 @@ class AutomationController:
         self.append_log(f"{item.get('clip_label')} was sent to TikTok with status {status or queue_status}.")
         if queue_status == "sent_to_inbox":
             mode_label = content_mode_label(item.get("content_mode"))
-            self.notify(
-                f"{mode_label} video sent to TikTok inbox: {item.get('clip_label') or 'generated clip'}. "
-                f"{self.source_progress_line(str(item.get('source_id') or ''))}\n"
-                f"{self._caption_paste_message(item)}"
-            )
+            self.notify(self._upload_delivery_message(item, mode_label))
 
     def _mark_item_posted(self, item: dict[str, Any], remote_status: str, *, notify: bool = True) -> None:
         item_id = str(item.get("id") or "")
@@ -2902,7 +2941,10 @@ class AutomationController:
         self.append_log(f"{item.get('clip_label')} completed on TikTok and was removed from local queued storage.")
         if notify:
             label = item.get("clip_label") or "latest"
-            self.notify(f"Posted confirmed for {label}. {self.source_progress_line(source_id)}")
+            if self._is_english_story_item(item):
+                self.notify(f"Posted confirmed for English story video: {label}.")
+            else:
+                self.notify(f"Posted confirmed for {label}. {self.source_progress_line(source_id)}")
 
     def _maybe_finalize_source(self, source_id: str) -> None:
         source_entry = next((item for item in self.sources.list_sources() if item.get("id") == source_id), None)

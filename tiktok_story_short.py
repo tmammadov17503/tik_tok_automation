@@ -17,7 +17,7 @@ HEIGHT = 1920
 FPS = 30
 MIN_STORY_SECONDS = 64.0
 THUMBNAIL_OUTRO_SECONDS = 0.65
-RENDER_VERSION = "tiktok_story_reel_v1"
+RENDER_VERSION = "tiktok_story_reel_v2_story_format"
 
 BG = "0x070911"
 PANEL = "0x101820"
@@ -299,7 +299,7 @@ def generate_tiktok_story_clip(
             "start_seconds": 0.0,
             "end_seconds": round(_media_duration(video_path), 2),
             "excerpt": story["hook"],
-            "reason": "Original English story reel generated from the Agent Proof Lab Shorts format.",
+            "reason": "Original English story reel generated for the autonomous story account.",
         }
     ]
     segments_path.write_text(json.dumps(segments, indent=2), encoding="utf-8")
@@ -314,7 +314,7 @@ def generate_tiktok_story_clip(
         "topic_slug": story["slug"],
         "story_source": story.get("story_source") or "library",
         "category": story.get("category") or "",
-        "caption_style": "lower_karaoke_phrase_captions_red_words",
+        "caption_style": "lower_story_karaoke_captions_red_words",
         "poster_style": "thumbnail_safe_final_outro",
         "thumbnail_outro_seconds": THUMBNAIL_OUTRO_SECONDS,
         "duration_seconds": round(_media_duration(video_path), 2),
@@ -399,8 +399,9 @@ def _request_ai_story_payload(source_entry: dict[str, Any], *, sequence_index: i
                 "role": "system",
                 "content": (
                     "You create short, original, monetization-safe English TikTok story scripts. "
-                    "Return strict JSON only. Avoid copyrighted fiction, explicit gore, current-news claims, "
-                    "and unsupported accusations. For horror, frame the story as folklore, legend, or mystery."
+                    "Return strict JSON only. Use well-known public-domain history, documented mysteries, "
+                    "or clearly framed folklore. Avoid copyrighted fiction, explicit gore, current-news claims, "
+                    "unsupported accusations, and invented historical events."
                 ),
             },
             {"role": "user", "content": prompt},
@@ -427,7 +428,9 @@ def _ai_story_prompt(source_entry: dict[str, Any], *, sequence_index: int, genre
         "- Each beat narration is 16 to 27 spoken words, simple and punchy.\n"
         "- Total script should feel like a 60 to 75 second story.\n"
         "- Start with a curiosity hook, then setup, pressure, turn, consequence, final sting.\n"
-        "- Use public-domain historical/folklore subject matter, no franchise characters, no graphic gore.\n"
+        "- Use a real, widely known historical/folklore subject. Do not invent disasters, causes, dates, or places.\n"
+        "- If the story is folklore or horror, clearly frame it as legend, rumor, or alleged haunting.\n"
+        "- No franchise characters, no graphic gore, no modern crime allegations.\n"
         "- Onscreen text must be 2 to 5 words, bold, emotional, and safe for TikTok.\n"
         "Return JSON with keys: slug, title, short_title, hook, category, beats. "
         "beats is an array of objects with label, narration, onscreen_text."
@@ -762,57 +765,90 @@ def _merge_segments_with_audio(ffmpeg: str, concat_path: Path, voiceover_path: P
 
 def _beat_filters(story: dict[str, Any], beat: dict[str, str], *, index: int, total: int, duration: float) -> list[str]:
     accent = [GREEN, CYAN, AMBER, RED][(index - 1) % 4]
-    progress_height = int(1510 * (index / max(total, 1)))
+    badge = _story_badge(story)
+    story_title = _one_line(str(story.get("title") or story.get("short_title") or "Story"), 36)
     filters = [
         f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color={BG}:t=fill",
-        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color={_fallback_color(index)}@0.22:t=fill",
-        f"drawbox=x='-260+mod(t*210+{index * 110}\\,1600)':y=0:w=180:h={HEIGHT}:color={AMBER}@0.080:t=fill",
-        f"drawbox=x=54:y=78:w=972:h=1520:color={PANEL}@0.58:t=fill",
-        f"drawbox=x=54:y=78:w=972:h=1520:color={accent}@0.42:t=4",
-        f"drawbox=x=976:y=142:w=10:h=1510:color=white@0.13:t=fill",
-        f"drawbox=x=976:y=142:w=10:h={progress_height}:color={accent}:t=fill",
-        _drawtext("TRUE STORY", 70, 92, 34, "white@0.92", max_chars=14, borderw=4),
-        _drawtext(_one_line(str(story.get("short_title") or ""), 21), 70, 138, 28, accent, max_chars=21, borderw=4),
-        _drawtext(f"{index:02d}/{total:02d}", 860, 92, 34, "white@0.88", max_chars=5, borderw=4),
-        f"drawbox=x=112:y=340:w=856:h=610:color={_fallback_color(index)}@0.42:t=fill",
-        f"drawbox=x=112:y=340:w=856:h=610:color=black@0.18:t=fill",
-        f"drawbox=x=148:y=386:w=784:h=72:color={accent}@0.18:t=fill",
-        _drawtext(_one_line(beat.get("label", "STORY").upper(), 22), 172, 404, 34, accent, max_chars=22, borderw=5),
-        f"drawbox=x='160+mod(t*80\\,700)':y=858:w=240:h=22:color=white@0.16:t=fill",
-        f"drawbox=x=218:y=520:w=644:h=210:color=white@0.055:t=fill",
-        f"drawbox=x=264:y=572:w=552:h=98:color={accent}@0.16:t=fill",
-        f"drawbox=x=324:y=456:w=432:h=346:color={accent}@0.10:t=fill",
-        f"drawbox=x=464:y=414:w=152:h=432:color={accent}@0.64:t=fill",
+        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color={_fallback_color(index)}@0.25:t=fill",
+        f"drawbox=x='-360+mod(t*150+{index * 90}\\,1700)':y=0:w=260:h={HEIGHT}:color={accent}@0.070:t=fill",
+        f"drawbox=x=0:y=0:w={WIDTH}:h=236:color=black@0.48:t=fill",
+        f"drawbox=x=0:y=1574:w={WIDTH}:h=346:color=black@0.46:t=fill",
+        f"drawbox=x=64:y=92:w=952:h=140:color=black@0.46:t=fill",
+        f"drawbox=x=64:y=92:w=952:h=140:color={accent}@0.32:t=3",
+        _drawtext(badge, 88, 116, 34, accent, max_chars=20, borderw=5),
+        _drawtext(story_title.upper(), 88, 166, 34, "white@0.94", max_chars=36, borderw=5),
+        f"drawbox=x=80:y=316:w=920:h=728:color=black@0.34:t=fill",
+        f"drawbox=x=80:y=316:w=920:h=728:color={_fallback_color(index)}@0.38:t=fill",
+        f"drawbox=x=80:y=316:w=920:h=728:color={accent}@0.24:t=5",
+        f"drawbox=x=128:y=372:w=824:h=96:color=black@0.42:t=fill",
+        _drawtext(_one_line(beat.get("label", "STORY").upper(), 26), 154, 394, 36, accent, max_chars=26, borderw=5),
+        f"drawbox=x=186:y=528:w=708:h=292:color=black@0.20:t=fill",
+        f"drawbox=x=222:y=564:w=288:h=10:color=white@0.12:t=fill",
+        f"drawbox=x=222:y=604:w=412:h=8:color=white@0.09:t=fill",
+        f"drawbox=x=222:y=642:w=354:h=8:color=white@0.08:t=fill",
+        f"drawbox=x=570:y=558:w=164:h=164:color=black@0.22:t=fill",
+        f"drawbox=x=588:y=578:w=128:h=14:color={accent}@0.22:t=fill",
+        f"drawbox=x=588:y=618:w=104:h=8:color=white@0.10:t=fill",
+        f"drawbox=x=588:y=654:w=122:h=8:color=white@0.08:t=fill",
+        f"drawbox=x=322:y=714:w=434:h=4:color={accent}@0.24:t=fill",
+        f"drawbox=x=318:y=700:w=34:h=34:color={accent}@0.28:t=fill",
+        f"drawbox=x=722:y=698:w=38:h=38:color={accent}@0.22:t=fill",
+        f"drawbox=x=264:y=586:w=552:h=176:color={accent}@0.18:t=fill",
+        f"drawbox=x=438:y=480:w=204:h=396:color=white@0.050:t=fill",
+        f"drawbox=x=484:y=432:w=112:h=492:color={accent}@0.38:t=fill",
+        f"drawbox=x='132+mod(t*92\\,760)':y=980:w=260:h=18:color=white@0.16:t=fill",
     ]
-    y = 1006
+    y = 1102
     for line in _wrap_text(str(beat.get("onscreen_text") or "").upper(), max_chars=18, max_lines=3):
-        filters.append(_drawtext_center(line, y, 68, WHITE, max_chars=18, borderw=9))
-        y += 82
+        filters.append(_drawtext_center(line, y, 76, WHITE, max_chars=18, borderw=10))
+        y += 90
     filters.extend(_karaoke_caption_filters(beat, duration=duration))
     return filters
 
 
 def _poster_filters(story: dict[str, Any], beat: dict[str, str]) -> list[str]:
-    lines = _headline_lines(str(story.get("short_title") or beat.get("onscreen_text") or story.get("title") or "TRUE STORY"))
+    lines = _headline_lines(str(story.get("short_title") or beat.get("onscreen_text") or story.get("title") or "STORY TIME"))
     start_y = 690 - (len(lines) - 1) * 58
     filters = [
         f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color=0x121015:t=fill",
         f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color={RED}@0.16:t=fill",
         f"drawbox=x=70:y=270:w=940:h=1130:color={AMBER}@0.10:t=fill",
+        f"drawbox=x=154:y=372:w=360:h=10:color=white@0.12:t=fill",
+        f"drawbox=x=154:y=420:w=520:h=8:color=white@0.08:t=fill",
+        f"drawbox=x=154:y=462:w=450:h=8:color=white@0.07:t=fill",
+        f"drawbox=x=638:y=358:w=210:h=210:color=black@0.20:t=fill",
+        f"drawbox=x=666:y=388:w=154:h=14:color={RED}@0.20:t=fill",
+        f"drawbox=x=666:y=438:w=122:h=8:color=white@0.08:t=fill",
+        f"drawbox=x=666:y=484:w=148:h=8:color=white@0.07:t=fill",
         f"drawbox=x=0:y=0:w={WIDTH}:h=190:color=black@0.38:t=fill",
         f"drawbox=x=0:y=1510:w={WIDTH}:h=410:color=black@0.28:t=fill",
         f"drawbox=x=0:y=0:w=18:h={HEIGHT}:color={RED}@0.88:t=fill",
         f"drawbox=x={WIDTH - 18}:y=0:w=18:h={HEIGHT}:color={AMBER}@0.80:t=fill",
-        _drawtext("TRUE HISTORY", 70, 64, 34, "white@0.94", max_chars=14, borderw=5),
-        _drawtext("WATCH THE TURN", 676, 70, 28, "white@0.86", max_chars=16, borderw=4),
+        _drawtext("STORY TIME", 70, 64, 34, "white@0.94", max_chars=14, borderw=5),
+        _drawtext(_story_badge(story), 650, 70, 28, "white@0.86", max_chars=18, borderw=4),
     ]
     for line_index, line in enumerate(lines):
         y = start_y + line_index * 128
         box_color = f"{RED}@0.84" if line_index == len(lines) - 1 else "black@0.62"
         filters.append(f"drawbox=x=72:y={y - 16}:w=936:h=108:color={box_color}:t=fill")
         filters.append(_drawtext_center(line, y, 76, WHITE, max_chars=18, borderw=10))
-    filters.append(_drawtext_center("FULL STORY IN 60 SECONDS", start_y + len(lines) * 128 + 46, 34, "white@0.90", max_chars=26, borderw=4))
+    filters.append(_drawtext_center("WATCH THE STORY UNFOLD", start_y + len(lines) * 128 + 46, 34, "white@0.90", max_chars=26, borderw=4))
     return filters
+
+
+def _story_badge(story: dict[str, Any]) -> str:
+    category = str(story.get("category") or "").upper()
+    if "FOLKLORE" in category or "HORROR" in category or "LEGEND" in category:
+        return "FOLKLORE STORY"
+    if "MYSTERY" in category or "VANISH" in category or "LOST" in category:
+        return "MYSTERY STORY"
+    if "DISASTER" in category or "SURVIVAL" in category:
+        return "SURVIVAL STORY"
+    if "ANCIENT" in category:
+        return "ANCIENT STORY"
+    if "BIOGRAPHY" in category:
+        return "DARK BIOGRAPHY"
+    return "STORY TIME"
 
 
 def _karaoke_caption_filters(beat: dict[str, str], *, duration: float) -> list[str]:
@@ -1000,7 +1036,8 @@ def _clean(value: Any) -> str:
 
 
 def _escape_drawtext(text: str) -> str:
-    return text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'").replace("%", "\\%")
+    safe_text = text.replace("'", "\u2019")
+    return safe_text.replace("\\", "\\\\").replace(":", "\\:").replace("%", "\\%")
 
 
 def _fallback_color(index: int) -> str:

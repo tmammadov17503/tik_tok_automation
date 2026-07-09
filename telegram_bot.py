@@ -543,14 +543,19 @@ class TelegramBotService:
     def _queue_text(self) -> str:
         sources = self.sources.list_sources()
         if not sources:
+            if simple_link_only_mode():
+                return "No English story batch is active. The bot will create one automatically on the next run."
             return "No source links are queued."
 
-        lines = ["Source queue"]
+        lines = ["English story queue" if simple_link_only_mode() else "Source queue"]
         for source in sources[:12]:
             title = source.get("title") or source.get("source_url") or "source"
             source_id = str(source.get("id") or "")
             profile = source.get("account_profile_label") or account_profile_label(source.get("account_profile"))
             language = str(source.get("audience_language") or "ru").upper()
+            if simple_link_only_mode() and normalize_account_profile(source.get("account_profile")) == ACCOUNT_PROFILE_FUTURE_EN:
+                lines.append(f"- English story batch: {self.automation.source_progress_line(source_id)}")
+                continue
             lines.append(f"- {title} [{profile}, {language}]: {self.automation.source_progress_line(source_id)}")
         if len(sources) > 12:
             lines.append(f"...and {len(sources) - 12} more.")
