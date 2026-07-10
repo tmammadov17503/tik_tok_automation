@@ -22,7 +22,7 @@ SCENE_HEIGHT = 960
 FPS = 30
 MIN_STORY_SECONDS = 64.0
 THUMBNAIL_OUTRO_SECONDS = 0.65
-RENDER_VERSION = "tiktok_story_reel_v4_openai_comic_panels"
+RENDER_VERSION = "tiktok_story_reel_v5_synced_comic_panels"
 OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
 DEFAULT_IMAGE_SIZE = "1024x1536"
 
@@ -576,11 +576,12 @@ def render_story_video(
         segment_paths.append(segment_path)
 
     outro_path = segments_dir / "beat_99_thumbnail_outro.mp4"
-    _render_thumbnail_outro_segment(ffmpeg, poster_path, outro_path, THUMBNAIL_OUTRO_SECONDS)
+    thumbnail_outro_seconds = min(0.95, max(0.2, THUMBNAIL_OUTRO_SECONDS))
+    _render_thumbnail_outro_segment(ffmpeg, poster_path, outro_path, thumbnail_outro_seconds)
     segment_paths.append(outro_path)
     concat_path = output_dir / "concat.txt"
     concat_path.write_text(_concat_file(segment_paths), encoding="utf-8")
-    _merge_segments_with_audio(ffmpeg, concat_path, voiceover_path, video_path, story_duration + THUMBNAIL_OUTRO_SECONDS)
+    _merge_segments_with_audio(ffmpeg, concat_path, voiceover_path, video_path, story_duration + thumbnail_outro_seconds)
 
 
 def story_narration_text(story: dict[str, Any]) -> str:
@@ -1416,8 +1417,7 @@ def _karaoke_caption_filters(beat: dict[str, str], *, duration: float, index: in
                 start, end = group_windows[group_window_index] if group_window_index < len(group_windows) else (0.0, duration)
                 prefix = " ".join(line_words[:word_index])
                 raw_word_x = x + (_text_width(f"{prefix} ", size) if prefix else 0)
-                word_x = _safe_caption_x_for_word(raw_word_x, _text_width(safe_word, size))
-                filters.append(_drawtext(safe_word, word_x, y, size, RED, max_chars=18, borderw=10, enable=_between(start, end)))
+                filters.append(_drawtext(safe_word, int(raw_word_x), y, size, RED, max_chars=18, borderw=3, enable=_between(start, end)))
                 group_window_index += 1
     if index == 1:
         filters.append(_drawtext_center("REAL STORY", first_caption_y - 78, 32, "white@0.86", max_chars=16, borderw=4))
@@ -1425,9 +1425,24 @@ def _karaoke_caption_filters(beat: dict[str, str], *, duration: float, index: in
 
 
 def _beat_durations(beats: list[dict[str, str]], duration: float) -> list[float]:
-    weights = [max(1.0, math.sqrt(len(str(beat.get("narration") or "")))) for beat in beats]
+    if not beats:
+        return []
+    safe_duration = max(0.1, duration)
+    floor = min(2.8, safe_duration / len(beats))
+    weights = [_beat_timing_weight(beat) for beat in beats]
     total = sum(weights) or 1.0
-    return [max(4.0, duration * (weight / total)) for weight in weights]
+    remaining = max(0.0, safe_duration - floor * len(beats))
+    durations = [floor + remaining * (weight / total) for weight in weights]
+    durations[-1] += safe_duration - sum(durations)
+    return [max(0.1, value) for value in durations]
+
+
+def _beat_timing_weight(beat: dict[str, str]) -> float:
+    text = str(beat.get("narration") or beat.get("onscreen_text") or beat.get("label") or "")
+    words = [word for word in re.split(r"\s+", _clean(text)) if word]
+    if not words:
+        return 1.0
+    return max(1.0, sum(_word_timing_weight(word) for word in words))
 
 
 def _caption_word_groups(text: str, *, max_words: int) -> list[list[str]]:
@@ -1498,11 +1513,6 @@ def _safe_caption_x(line_width: int) -> int:
     return max(CAPTION_SAFE_LEFT, min(CAPTION_SAFE_RIGHT - line_width, int((WIDTH - line_width) / 2)))
 
 
-def _safe_caption_x_for_word(x: int, word_width: int) -> int:
-    safe_word_width = min(word_width, CAPTION_SAFE_WIDTH)
-    return max(CAPTION_SAFE_LEFT, min(int(x), CAPTION_SAFE_RIGHT - safe_word_width))
-
-
 def _caption_group_layout(line_count: int) -> tuple[int, int, int]:
     if line_count <= 1:
         return 1304, 72, 86
@@ -1514,12 +1524,15 @@ def _word_timing_windows(words: list[str], duration: float) -> list[tuple[float,
         return [(0.0, duration)]
     weights = [_word_timing_weight(word) for word in words]
     total = sum(weights) or 1.0
-    cursor = 0.0
+    lead_in = min(0.18, max(0.0, duration * 0.025))
+    tail_hold = min(0.24, max(0.0, duration * 0.035))
+    spoken_duration = max(0.1, duration - lead_in - tail_hold)
+    cursor = lead_in
     windows: list[tuple[float, float]] = []
     for index, weight in enumerate(weights):
-        word_duration = duration * (weight / total)
+        word_duration = spoken_duration * (weight / total)
         start = min(duration, cursor)
-        end = duration if index == len(words) - 1 else min(duration, cursor + word_duration)
+        end = min(duration, cursor + word_duration)
         windows.append((start, end))
         cursor = end
     return windows
@@ -1527,7 +1540,12 @@ def _word_timing_windows(words: list[str], duration: float) -> list[tuple[float,
 
 def _word_timing_weight(word: str) -> float:
     letters = re.sub(r"[^A-Za-z0-9]", "", word)
-    return max(0.7, min(3.2, len(letters) ** 0.72))
+    base = max(0.7, min(3.2, len(letters) ** 0.72))
+    if re.search(r"[.!?…]$", word):
+        base += 0.75
+    elif re.search(r"[,;:]$", word):
+        base += 0.35
+    return base
 
 
 def _between(start: float, end: float) -> str:
