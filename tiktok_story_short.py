@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -10,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 WIDTH = 1080
@@ -19,7 +22,9 @@ SCENE_HEIGHT = 960
 FPS = 30
 MIN_STORY_SECONDS = 64.0
 THUMBNAIL_OUTRO_SECONDS = 0.65
-RENDER_VERSION = "tiktok_story_reel_v3_cinematic_scenes"
+RENDER_VERSION = "tiktok_story_reel_v4_openai_comic_panels"
+OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
+DEFAULT_IMAGE_SIZE = "1024x1536"
 
 BG = "0x070911"
 PANEL = "0x101820"
@@ -29,6 +34,12 @@ AMBER = "0xffc857"
 RED = "0xff4d5e"
 WHITE = "white"
 MUTED = "0xd8dde5"
+CAPTION_SAFE_LEFT = 48
+CAPTION_SAFE_RIGHT = WIDTH - 48
+CAPTION_SAFE_WIDTH = CAPTION_SAFE_RIGHT - CAPTION_SAFE_LEFT
+CAPTION_MIN_FONT_SIZE = 50
+POSTER_SAFE_TEXT_WIDTH = 860
+POSTER_MIN_FONT_SIZE = 54
 
 AI_STORY_DISABLED_VALUES = {"0", "false", "no", "off"}
 GENRE_ROTATION = [
@@ -437,8 +448,10 @@ def _ai_story_prompt(source_entry: dict[str, Any], *, sequence_index: int, genre
         "- If the story is folklore or horror, clearly frame it as legend, rumor, or alleged haunting.\n"
         "- No franchise characters, no graphic gore, no modern crime allegations.\n"
         "- Onscreen text must be 2 to 5 words, bold, emotional, and safe for TikTok.\n"
+        "- Each beat must include visual: one concrete comic-panel scene description, with setting, character/action, props, and mood.\n"
+        "- Each beat may include palette: 3 to 5 color/mood words.\n"
         "Return JSON with keys: slug, title, short_title, hook, category, beats. "
-        "beats is an array of objects with label, narration, onscreen_text."
+        "beats is an array of objects with label, narration, onscreen_text, visual, palette."
     )
 
 
@@ -470,6 +483,9 @@ def _normalize_ai_story(
                 "label": _one_line(label, 28),
                 "narration": narration,
                 "onscreen_text": _one_line(onscreen.upper(), 28),
+                "visual": _one_line(_clean(raw_beat.get("visual")), 240),
+                "palette": _one_line(_clean(raw_beat.get("palette")), 90),
+                "motion": _one_line(_clean(raw_beat.get("motion")) or "slow push with subtle parallax", 80),
             }
         )
     if len(beats) < 8:
@@ -488,8 +504,24 @@ def _normalize_ai_story(
         "category": category,
         "source_url": str(source_entry.get("source_url") or ""),
         "story_source": "openai_story_discovery",
-        "beats": beats,
+        "beats": [_with_fallback_visual_for_story(beat, index, title=title, category=category) for index, beat in enumerate(beats, start=1)],
     }
+
+
+def _with_fallback_visual_for_story(beat: dict[str, str], index: int, *, title: str, category: str) -> dict[str, str]:
+    enriched = dict(beat)
+    if not enriched.get("visual"):
+        enriched["visual"] = (
+            f"comic-book scene for {title}, beat {index}: {enriched.get('label')}. "
+            f"Show the exact story moment from the narration with expressive characters, props, and historical setting."
+        )
+    if not enriched.get("palette"):
+        enriched["palette"] = "dramatic comic colors, ink shadows, cinematic highlights"
+    if not enriched.get("motion"):
+        enriched["motion"] = "slow push with subtle parallax"
+    if category:
+        enriched["visual"] = f"{enriched['visual']} Category mood: {category}."
+    return enriched
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
@@ -526,14 +558,19 @@ def render_story_video(
     beat_durations = _beat_durations(beats, story_duration)
     segment_paths: list[Path] = []
     log = logger or (lambda message: None)
+    scene_paths = _prepare_story_scene_images(story, beats, output_dir, logger=log)
 
     poster_background_path = segments_dir / "poster_background.ppm"
-    _write_scene_background(story, beats[0], 0, len(beats), poster_background_path)
+    if scene_paths.get(1):
+        poster_background_path = scene_paths[1]
+    else:
+        _write_scene_background(story, beats[0], 0, len(beats), poster_background_path)
     _render_poster_frame(ffmpeg, story, beats[0], poster_path, poster_background_path)
     for index, (beat, duration) in enumerate(zip(beats, beat_durations), start=1):
         segment_path = segments_dir / f"beat_{index:02d}.mp4"
-        background_path = segments_dir / f"background_{index:02d}.ppm"
-        _write_scene_background(story, beat, index, len(beats), background_path)
+        background_path = scene_paths.get(index) or (segments_dir / f"background_{index:02d}.ppm")
+        if not background_path.exists():
+            _write_scene_background(story, beat, index, len(beats), background_path)
         log(f"Rendering story beat {index}/{len(beats)}.")
         _render_beat_segment(ffmpeg, story, beat, index, len(beats), duration, segment_path, background_path)
         segment_paths.append(segment_path)
@@ -598,7 +635,7 @@ def _openai_speech_to_file(model: str, voice: str, narration: str, output_path: 
 
 def _beats_for_topic(topic: dict[str, str]) -> list[dict[str, str]]:
     figure = topic["figure"]
-    return [
+    beats = [
         {
             "label": "The Hook",
             "narration": topic["hook"],
@@ -640,6 +677,39 @@ def _beats_for_topic(topic: dict[str, str]) -> list[dict[str, str]]:
             "onscreen_text": figure.upper(),
         },
     ]
+    return [_with_default_visual(topic, beat, index) for index, beat in enumerate(beats, start=1)]
+
+
+def _with_default_visual(topic: dict[str, str], beat: dict[str, str], index: int) -> dict[str, str]:
+    enriched = dict(beat)
+    figure = topic.get("figure", "the central character")
+    place = topic.get("place", "a historical setting")
+    year = topic.get("year", "the era")
+    visual_templates = [
+        f"dramatic opening portrait of {figure} in {place}, {year}, surrounded by symbolic clues from the story",
+        f"wide establishing scene of {place} in {year}, architecture, weather, and tense atmosphere",
+        f"{figure} making an important choice, papers, maps, witnesses, and period objects around them",
+        "powerful opponents watching from shadows, official rooms, documents, guards, and pressure closing in",
+        "the conflict escalating, dramatic lighting, worried faces, symbolic evidence, and a sense of danger",
+        "the betrayal or turning point moment, cinematic composition, urgent movement, no gore",
+        "aftermath scene showing consequences, empty rooms, broken symbols, people reacting in silence",
+        f"final memorable portrait of {figure}, historical props, dramatic light, unresolved mood",
+    ]
+    enriched.setdefault("visual", visual_templates[(index - 1) % len(visual_templates)])
+    enriched.setdefault("palette", _default_visual_palette(topic, index))
+    enriched.setdefault("motion", "slow push with subtle parallax")
+    return enriched
+
+
+def _default_visual_palette(topic: dict[str, str], index: int) -> str:
+    category = str(topic.get("category") or "").lower()
+    if "horror" in category or "folklore" in category:
+        return "dark forest green, candle amber, black shadows"
+    if "mystery" in category or "lost" in category:
+        return "midnight blue, fog gray, cold cyan, amber clue light"
+    if "survival" in category:
+        return "icy blue, storm gray, harsh white, danger red"
+    return ["deep emerald, warm gold, red warning accents", "ink black, aged paper, muted teal"][(index - 1) % 2]
 
 
 def _render_beat_segment(
@@ -781,6 +851,172 @@ def _merge_segments_with_audio(ffmpeg: str, concat_path: Path, voiceover_path: P
         ],
         timeout=300,
     )
+
+
+def _prepare_story_scene_images(
+    story: dict[str, Any],
+    beats: list[dict[str, Any]],
+    output_dir: Path,
+    *,
+    logger: Callable[[str], None],
+) -> dict[int, Path]:
+    scene_root = output_dir / "scenes"
+    scene_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = scene_root / "visual_manifest.json"
+    required = _story_images_required()
+    enabled = os.getenv("TIKTOK_GENERATE_AI_STORY_IMAGES", "true").strip().lower() not in AI_STORY_DISABLED_VALUES
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2").strip() or "gpt-image-2"
+    quality = os.getenv("OPENAI_IMAGE_QUALITY", "low").strip() or "low"
+    scene_paths: dict[int, Path] = {}
+    errors: list[str] = []
+
+    if not enabled or not api_key or not model:
+        message = "OpenAI story image generation is not configured."
+        if required:
+            raise RuntimeError(f"{message} Refusing to send fallback-looking English story video.")
+        errors.append(message)
+        _write_visual_manifest(manifest_path, model="", quality="", scene_paths=scene_paths, errors=errors)
+        return scene_paths
+
+    for index, beat in enumerate(beats, start=1):
+        scene_path = scene_root / f"scene_{index:02d}.png"
+        if scene_path.exists() and scene_path.stat().st_size > 0:
+            scene_paths[index] = scene_path
+            continue
+        prompt = _openai_scene_prompt(story, beat, index=index)
+        try:
+            logger(f"Generating comic story panel {index}/{len(beats)}.")
+            _generate_openai_scene_image(api_key=api_key, model=model, quality=quality, prompt=prompt, output_path=scene_path)
+            scene_paths[index] = scene_path
+        except Exception as exc:
+            errors.append(f"scene_{index:02d}: {_safe_visual_error(exc)}")
+            if required:
+                raise RuntimeError(
+                    "OpenAI story image generation failed; refusing to send fallback-looking English story video: "
+                    f"{_safe_visual_error(exc)}"
+                ) from exc
+
+    _write_visual_manifest(manifest_path, model=model, quality=quality, scene_paths=scene_paths, errors=errors)
+    return scene_paths
+
+
+def _story_images_required() -> bool:
+    value = os.getenv("TIKTOK_REQUIRE_AI_STORY_IMAGES", "true").strip().lower()
+    return value not in AI_STORY_DISABLED_VALUES
+
+
+def _generate_openai_scene_image(
+    *,
+    api_key: str,
+    model: str,
+    quality: str,
+    prompt: str,
+    output_path: Path,
+) -> None:
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "size": DEFAULT_IMAGE_SIZE,
+        "quality": quality,
+        "n": 1,
+    }
+    request = Request(
+        OPENAI_IMAGES_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urlopen(request, timeout=240) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OpenAI image API error {exc.code}: {_safe_openai_error(body)}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"OpenAI image network error: {exc.reason}") from exc
+
+    try:
+        parsed = json.loads(raw or "{}")
+        first = parsed["data"][0]
+        if first.get("b64_json"):
+            image_bytes = base64.b64decode(str(first["b64_json"]))
+        elif first.get("url"):
+            with urlopen(str(first["url"]), timeout=180) as image_response:
+                image_bytes = image_response.read()
+        else:
+            raise KeyError("missing image data")
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise RuntimeError("OpenAI image API returned an invalid response.") from exc
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(image_bytes)
+    if output_path.stat().st_size <= 0:
+        raise RuntimeError("OpenAI image API returned an empty image.")
+
+
+def _openai_scene_prompt(story: dict[str, Any], beat: dict[str, Any], *, index: int) -> str:
+    brand_style = os.getenv("TIKTOK_STORY_IMAGE_STYLE", "").strip()
+    style = brand_style or (
+        "vertical 9:16 high-detail comic-book historical illustration, thick clean black ink outlines, "
+        "flat cinematic colors, dramatic shadows, expressive non-photorealistic characters, rich background detail, "
+        "TikTok-ready composition with clear subject in the center and room for captions in the lower third"
+    )
+    return (
+        f"{style}. "
+        "No text, no captions, no logos, no watermarks, no readable documents, no speech bubbles, no UI. "
+        "Avoid gore and graphic violence. Do not create a photorealistic exact likeness of a real person; "
+        "use an original comic-inspired historical character design. "
+        f"Series/story title: {story.get('short_title') or story.get('title')}. "
+        f"Category: {story.get('category') or 'historical story'}. "
+        f"Beat {index}: {beat.get('label')}. "
+        f"Scene: {beat.get('visual') or beat.get('narration')}. "
+        f"On-screen idea, not rendered as text: {beat.get('onscreen_text')}. "
+        f"Mood and palette: {beat.get('palette') or 'dramatic historical comic, deep shadows, red and gold accents'}."
+    )
+
+
+def _write_visual_manifest(
+    manifest_path: Path,
+    *,
+    model: str,
+    quality: str,
+    scene_paths: dict[int, Path],
+    errors: list[str],
+) -> None:
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "generated_at": _utc_now(),
+                "provider": "openai_images" if model else "fallback",
+                "model": model,
+                "quality": quality,
+                "image_size": DEFAULT_IMAGE_SIZE,
+                "render_version": RENDER_VERSION,
+                "scene_count": len(scene_paths),
+                "errors": errors,
+                "scenes": {str(index): str(path) for index, path in sorted(scene_paths.items())},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _safe_openai_error(body: str) -> str:
+    try:
+        parsed = json.loads(body or "{}")
+        message = parsed.get("error", {}).get("message") or parsed.get("message") or body
+        return str(message)[:500]
+    except ValueError:
+        return body[:500]
+
+
+def _safe_visual_error(exc: Exception) -> str:
+    return re.sub(r"sk-[A-Za-z0-9_-]+", "sk-***", str(exc))[:500]
 
 
 Color = tuple[int, int, int]
@@ -1053,55 +1289,66 @@ def _clamp(value: float) -> int:
 
 
 def _beat_filters(story: dict[str, Any], beat: dict[str, str], *, index: int, total: int, duration: float) -> list[str]:
-    accent = [RED, AMBER, CYAN, GREEN][(index - 1) % 4]
-    badge = _story_badge(story)
-    story_title = _one_line(str(story.get("title") or story.get("short_title") or "Story"), 32)
-    label = _one_line(str(beat.get("label") or "The Moment").upper(), 22)
-    headline = str(beat.get("onscreen_text") or story.get("short_title") or "").upper()
-    headline_lines = _headline_lines(headline)
-    headline_start_y = 1018 - (len(headline_lines) - 1) * 50
     filters = [
-        f"scale=1188:2112:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT}:x='(iw-ow)/2+sin(t*0.22+{index})*28':y='(ih-oh)/2+cos(t*0.18+{index})*34',setsar=1,fps={FPS}",
-        "eq=contrast=1.08:saturation=1.12:brightness=-0.018",
-        f"drawbox=x=0:y=0:w={WIDTH}:h=330:color=black@0.36:t=fill",
-        f"drawbox=x=0:y=1500:w={WIDTH}:h=420:color=black@0.42:t=fill",
-        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color={_fallback_color(index)}@0.08:t=fill",
-        f"drawbox=x='-620+mod(t*96+{index * 170}\\,1780)':y=210:w=500:h=92:color=white@0.055:t=fill",
-        f"drawbox=x='-760+mod(t*78+{index * 210}\\,1900)':y=760:w=620:h=74:color=white@0.045:t=fill",
-        f"drawbox=x=52:y=86:w=6:h=96:color={accent}@0.92:t=fill",
-        _drawtext(badge, 78, 82, 30, accent, max_chars=20, borderw=5),
-        _drawtext(story_title.upper(), 78, 128, 34, "white@0.96", max_chars=34, borderw=6),
-        f"drawbox=x=72:y=898:w=936:h=84:color=black@0.35:t=fill",
-        f"drawbox=x=72:y=898:w=936:h=84:color={accent}@0.34:t=4",
-        _drawtext_center(label, 920, 40, accent, max_chars=22, borderw=6),
+        (
+            "scale=1260:2240:force_original_aspect_ratio=increase,"
+            f"rotate='0.005*sin(t*0.75+{index})':ow=iw:oh=ih:c=black@0,"
+            f"crop={WIDTH}:{HEIGHT}:x='(iw-ow)/2+34*sin(t*0.48+{index})':"
+            f"y='(ih-oh)/2+42*cos(t*0.36+{index})',"
+            f"setsar=1,fps={FPS},eq=contrast=1.13:saturation=1.30:brightness=0.025,unsharp=5:5:0.55"
+        ),
+        f"drawbox=x='-260+mod(t*210+{index * 90}\\,1600)':y=0:w=180:h={HEIGHT}:color={AMBER}@0.085:t=fill",
+        f"drawbox=x=0:y='mod(t*260+{index * 140}\\,1920)':w={WIDTH}:h=5:color=white@0.16:t=fill",
+        f"drawbox=x=0:y='mod(t*155+{index * 220}\\,1920)':w={WIDTH}:h=3:color={CYAN}@0.12:t=fill",
+        _drawtext(_story_brand(), 742, 64, 24, "white@0.86", max_chars=20, borderw=3),
+        _drawtext(
+            _one_line(str(story.get("short_title") or ""), 34),
+            56,
+            64,
+            24,
+            "white@0.90",
+            max_chars=34,
+            borderw=3,
+        ),
     ]
-    for line_index, line in enumerate(headline_lines):
-        y = headline_start_y + line_index * 86
-        color = RED if line_index == len(headline_lines) - 1 else (AMBER if line_index % 2 else WHITE)
-        filters.append(_drawtext_center(line, y, 82, color, max_chars=18, borderw=11))
-    filters.append(f"drawbox=x='132+mod(t*105\\,816)':y=1246:w=260:h=8:color={accent}@0.55:t=fill")
-    filters.extend(_karaoke_caption_filters(beat, duration=duration))
+    if index == 1:
+        filters.extend(_glitch_hook_filters())
+    filters.extend(_karaoke_caption_filters(beat, duration=duration, index=index))
     return filters
 
 
 def _poster_filters(story: dict[str, Any], beat: dict[str, str]) -> list[str]:
-    lines = _headline_lines(str(story.get("short_title") or beat.get("onscreen_text") or story.get("title") or "STORY TIME"))
-    start_y = 710 - (len(lines) - 1) * 58
+    headline_source = story.get("hook_text") or story.get("short_title") or beat.get("onscreen_text") or story.get("hook")
+    lines = _poster_headline_lines(str(headline_source or "STORY TIME"))
+    line_count = max(1, len(lines))
+    headline_size = _poster_headline_font_size(lines, 92 if line_count <= 2 else 82)
+    line_gap = max(96, headline_size + 28)
+    start_y = 1206 - int((line_count - 1) * line_gap * 0.64)
+    panel_y = start_y - 54
+    panel_h = line_count * line_gap + 70
     filters = [
-        f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},setsar=1",
-        "eq=contrast=1.10:saturation=1.16:brightness=-0.03",
-        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color=black@0.18:t=fill",
-        f"drawbox=x=0:y=0:w={WIDTH}:h=330:color=black@0.44:t=fill",
-        f"drawbox=x=0:y=1440:w={WIDTH}:h=480:color=black@0.46:t=fill",
-        f"drawbox=x=56:y=90:w=8:h=118:color={RED}@0.95:t=fill",
-        _drawtext("TRUE STORY", 86, 88, 36, RED, max_chars=14, borderw=6),
-        _drawtext(_story_badge(story), 86, 144, 30, "white@0.92", max_chars=20, borderw=5),
+        (
+            "scale=1260:2240:force_original_aspect_ratio=increase,"
+            f"crop={WIDTH}:{HEIGHT}:x=(iw-ow)/2:y=(ih-oh)/2,"
+            "setsar=1,eq=contrast=1.18:saturation=1.36:brightness=0.02,unsharp=5:5:0.60"
+        ),
+        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color=black@0.12:t=fill",
+        f"drawbox=x=0:y=0:w={WIDTH}:h=150:color=black@0.24:t=fill",
+        f"drawbox=x=0:y=870:w={WIDTH}:h=520:color=black@0.28:t=fill",
+        f"drawbox=x=0:y=1450:w={WIDTH}:h=470:color=black@0.22:t=fill",
+        f"drawbox=x=0:y=0:w=16:h={HEIGHT}:color={RED}@0.82:t=fill",
+        f"drawbox=x={WIDTH - 16}:y=0:w=16:h={HEIGHT}:color={AMBER}@0.74:t=fill",
+        f"drawbox=x=76:y={panel_y}:w=928:h={panel_h}:color=black@0.48:t=fill",
+        f"drawbox=x=98:y={panel_y + panel_h - 32}:w=884:h=16:color={RED}@0.92:t=fill",
+        _drawtext(_story_brand(), 748, 58, 24, "white@0.86", max_chars=20, borderw=3),
     ]
     for line_index, line in enumerate(lines):
-        y = start_y + line_index * 128
-        color = RED if line_index == len(lines) - 1 else WHITE
-        filters.append(_drawtext_center(line, y, 86, color, max_chars=18, borderw=12))
-    filters.append(_drawtext_center("WATCH UNTIL THE END", start_y + len(lines) * 128 + 62, 38, AMBER, max_chars=22, borderw=6))
+        y = start_y + line_index * line_gap
+        if line_index == len(lines) - 1:
+            underline_y = y + max(48, int(headline_size * 0.72))
+            filters.append(f"drawbox=x=110:y={underline_y}:w=860:h=22:color={RED}@0.82:t=fill")
+        filters.append(_drawtext_center(line, y, headline_size, WHITE, max_chars=18, borderw=11))
+    filters.append(f"drawbox=x='10':y=0:w=150:h={HEIGHT}:color=white@0.08:t=fill")
     return filters
 
 
@@ -1120,13 +1367,27 @@ def _story_badge(story: dict[str, Any]) -> str:
     return "STORY TIME"
 
 
-def _karaoke_caption_filters(beat: dict[str, str], *, duration: float) -> list[str]:
-    text = str(beat.get("narration") or "")
+def _story_brand() -> str:
+    return os.getenv("TIKTOK_STORY_BRAND", "DAMN WHAT A CLIP").strip().upper() or "DAMN WHAT A CLIP"
+
+
+def _glitch_hook_filters() -> list[str]:
+    return [
+        f"drawbox=x=0:y=232:w={WIDTH}:h=12:color={CYAN}@0.70:t=fill:enable='between(t\\,0.05\\,0.18)'",
+        f"drawbox=x=64:y=612:w=820:h=18:color={RED}@0.68:t=fill:enable='between(t\\,0.14\\,0.24)'",
+        f"drawbox=x=180:y=1338:w=780:h=14:color={CYAN}@0.58:t=fill:enable='between(t\\,0.25\\,0.38)'",
+        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color=white@0.10:t=fill:enable='between(t\\,0.00\\,0.05)'",
+    ]
+
+
+def _karaoke_caption_filters(beat: dict[str, str], *, duration: float, index: int) -> list[str]:
+    text = str(beat.get("narration") or beat.get("onscreen_text") or beat.get("label") or "")
     groups = _caption_word_groups(text.upper(), max_words=4)
     flat_words = [word for group in groups for word in group]
     timing_windows = _word_timing_windows(flat_words, duration)
     filters: list[str] = []
     word_cursor = 0
+    first_caption_y = 1304
     for group in groups:
         group_windows = timing_windows[word_cursor : word_cursor + len(group)]
         word_cursor += len(group)
@@ -1135,22 +1396,31 @@ def _karaoke_caption_filters(beat: dict[str, str], *, duration: float) -> list[s
         group_start = max(0.0, group_windows[0][0])
         group_end = min(duration, group_windows[-1][1])
         group_enable = _between(group_start, group_end)
-        lines = _caption_group_lines(group, size=74)
+        draw_group = [_caption_display_word(word) for word in group]
+        lines = _caption_group_lines(draw_group, size=72)
         y_start, size, line_gap = _caption_group_layout(len(lines))
-        lines = _caption_group_lines(group, size=size)
+        lines = _caption_group_lines(draw_group, size=size)
+        size = _caption_fitted_font_size(lines, size)
+        y_start, size, line_gap = _caption_group_layout(len(lines))
+        line_gap = max(line_gap, size + 16)
+        first_caption_y = min(first_caption_y, y_start)
         group_window_index = 0
         for line_index, line_words in enumerate(lines):
             y = y_start + line_index * line_gap
             line_text = " ".join(line_words)
             line_width = _text_width(line_text, size)
-            x = max(32, int((WIDTH - min(line_width, 1016)) / 2))
+            x = _safe_caption_x(line_width)
             filters.append(_drawtext(line_text, x, y, size, WHITE, max_chars=120, borderw=10, enable=group_enable))
             for word_index, word in enumerate(line_words):
+                safe_word = _caption_display_word(word)
                 start, end = group_windows[group_window_index] if group_window_index < len(group_windows) else (0.0, duration)
                 prefix = " ".join(line_words[:word_index])
-                word_x = x + (_text_width(f"{prefix} ", size) if prefix else 0)
-                filters.append(_drawtext(_one_line(word, 20), word_x, y, size, RED, max_chars=20, borderw=10, enable=_between(start, end)))
+                raw_word_x = x + (_text_width(f"{prefix} ", size) if prefix else 0)
+                word_x = _safe_caption_x_for_word(raw_word_x, _text_width(safe_word, size))
+                filters.append(_drawtext(safe_word, word_x, y, size, RED, max_chars=18, borderw=10, enable=_between(start, end)))
                 group_window_index += 1
+    if index == 1:
+        filters.append(_drawtext_center("REAL STORY", first_caption_y - 78, 32, "white@0.86", max_chars=16, borderw=4))
     return filters
 
 
@@ -1180,23 +1450,63 @@ def _caption_word_groups(text: str, *, max_words: int) -> list[list[str]]:
 def _caption_group_lines(words: list[str], *, size: int) -> list[list[str]]:
     if not words:
         return [["STORY"]]
-    text = " ".join(words)
-    if len(words) <= 1 or _text_width(text, size) <= 996:
-        return [words]
+    remaining = [_caption_display_word(word) for word in words if _caption_display_word(word)]
+    if not remaining:
+        return [["STORY"]]
+    lines: list[list[str]] = []
+    while remaining:
+        if len(remaining) == 1 or _text_width(" ".join(remaining), size) <= CAPTION_SAFE_WIDTH:
+            lines.append(remaining)
+            break
+        split = _caption_split_index(remaining, size)
+        lines.append(remaining[:split])
+        remaining = remaining[split:]
+    return lines
+
+
+def _caption_split_index(words: list[str], size: int) -> int:
     best_split = 1
-    best_width = WIDTH
+    best_score = float("inf")
     for split in range(1, len(words)):
-        widest = max(_text_width(" ".join(words[:split]), size), _text_width(" ".join(words[split:]), size))
-        if widest < best_width:
-            best_width = widest
+        first_width = _text_width(" ".join(words[:split]), size)
+        second_width = _text_width(" ".join(words[split:]), size)
+        overflow = max(0, first_width - CAPTION_SAFE_WIDTH) + max(0, second_width - CAPTION_SAFE_WIDTH)
+        balance = abs(first_width - second_width) * 0.15
+        score = overflow * 10 + max(first_width, second_width) + balance
+        if score < best_score:
+            best_score = score
             best_split = split
-    return [words[:best_split], words[best_split:]]
+    return best_split
+
+
+def _caption_fitted_font_size(lines: list[list[str]], preferred_size: int) -> int:
+    size = preferred_size
+    while size > CAPTION_MIN_FONT_SIZE:
+        if all(_text_width(" ".join(line), size) <= CAPTION_SAFE_WIDTH for line in lines):
+            return size
+        size -= 4
+    return size
+
+
+def _caption_display_word(word: str) -> str:
+    return _one_line(_clean(word).replace("'", chr(8217)), 18)
+
+
+def _safe_caption_x(line_width: int) -> int:
+    if line_width >= CAPTION_SAFE_WIDTH:
+        return CAPTION_SAFE_LEFT
+    return max(CAPTION_SAFE_LEFT, min(CAPTION_SAFE_RIGHT - line_width, int((WIDTH - line_width) / 2)))
+
+
+def _safe_caption_x_for_word(x: int, word_width: int) -> int:
+    safe_word_width = min(word_width, CAPTION_SAFE_WIDTH)
+    return max(CAPTION_SAFE_LEFT, min(int(x), CAPTION_SAFE_RIGHT - safe_word_width))
 
 
 def _caption_group_layout(line_count: int) -> tuple[int, int, int]:
     if line_count <= 1:
-        return 1312, 76, 88
-    return 1236, 68, 84
+        return 1304, 72, 86
+    return 1228, 66, 82
 
 
 def _word_timing_windows(words: list[str], duration: float) -> list[tuple[float, float]]:
@@ -1252,7 +1562,30 @@ def _drawtext_center(text: str, y: int, size: int, color: str, *, max_chars: int
 
 
 def _text_width(text: str, size: int) -> int:
+    font_path = _font_path()
+    if font_path:
+        try:
+            from PIL import ImageFont
+
+            font = ImageFont.truetype(font_path.replace("\\:", ":"), size=size)
+            return int(font.getlength(text))
+        except Exception:
+            pass
     return int(sum(0.36 * size if char == " " else 0.66 * size for char in text))
+
+
+def _poster_headline_lines(text: str) -> list[str]:
+    lines = _wrap_text(_clean(text).upper(), max_chars=18, max_lines=3)
+    return [_one_line(line, 18).upper() for line in lines[:3]]
+
+
+def _poster_headline_font_size(lines: list[str], preferred_size: int) -> int:
+    size = preferred_size
+    while size > POSTER_MIN_FONT_SIZE:
+        if all(_text_width(line, size) <= POSTER_SAFE_TEXT_WIDTH for line in lines):
+            return size
+        size -= 4
+    return size
 
 
 def _headline_lines(text: str) -> list[str]:
