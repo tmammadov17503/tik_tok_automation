@@ -111,6 +111,8 @@ RETRYABLE_ERROR_HINTS = (
     "try again later",
     "temporarily",
     "too many requests",
+    "too many pending share",
+    "spam_risk_too_many_pending_share",
     "rate limit",
     "429",
     "500",
