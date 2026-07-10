@@ -14,10 +14,12 @@ from typing import Any, Callable
 
 WIDTH = 1080
 HEIGHT = 1920
+SCENE_WIDTH = 540
+SCENE_HEIGHT = 960
 FPS = 30
 MIN_STORY_SECONDS = 64.0
 THUMBNAIL_OUTRO_SECONDS = 0.65
-RENDER_VERSION = "tiktok_story_reel_v2_story_format"
+RENDER_VERSION = "tiktok_story_reel_v3_cinematic_scenes"
 
 BG = "0x070911"
 PANEL = "0x101820"
@@ -525,11 +527,15 @@ def render_story_video(
     segment_paths: list[Path] = []
     log = logger or (lambda message: None)
 
-    _render_poster_frame(ffmpeg, story, beats[0], poster_path)
+    poster_background_path = segments_dir / "poster_background.ppm"
+    _write_scene_background(story, beats[0], 0, len(beats), poster_background_path)
+    _render_poster_frame(ffmpeg, story, beats[0], poster_path, poster_background_path)
     for index, (beat, duration) in enumerate(zip(beats, beat_durations), start=1):
         segment_path = segments_dir / f"beat_{index:02d}.mp4"
+        background_path = segments_dir / f"background_{index:02d}.ppm"
+        _write_scene_background(story, beat, index, len(beats), background_path)
         log(f"Rendering story beat {index}/{len(beats)}.")
-        _render_beat_segment(ffmpeg, story, beat, index, len(beats), duration, segment_path)
+        _render_beat_segment(ffmpeg, story, beat, index, len(beats), duration, segment_path, background_path)
         segment_paths.append(segment_path)
 
     outro_path = segments_dir / "beat_99_thumbnail_outro.mp4"
@@ -644,16 +650,19 @@ def _render_beat_segment(
     total: int,
     duration: float,
     output_path: Path,
+    background_path: Path,
 ) -> None:
     filters = ",".join(_beat_filters(story, beat, index=index, total=total, duration=duration))
     _run(
         [
             ffmpeg,
             "-y",
-            "-f",
-            "lavfi",
+            "-loop",
+            "1",
+            "-framerate",
+            str(FPS),
             "-i",
-            f"color=c={BG}:s={WIDTH}x{HEIGHT}:d={max(0.5, duration):.3f}:r={FPS}",
+            str(background_path),
             "-vf",
             filters,
             "-t",
@@ -672,16 +681,24 @@ def _render_beat_segment(
     )
 
 
-def _render_poster_frame(ffmpeg: str, story: dict[str, Any], beat: dict[str, str], output_path: Path) -> None:
+def _render_poster_frame(
+    ffmpeg: str,
+    story: dict[str, Any],
+    beat: dict[str, str],
+    output_path: Path,
+    background_path: Path,
+) -> None:
     filters = ",".join(_poster_filters(story, beat))
     _run(
         [
             ffmpeg,
             "-y",
-            "-f",
-            "lavfi",
+            "-loop",
+            "1",
+            "-framerate",
+            "1",
             "-i",
-            f"color=c={BG}:s={WIDTH}x{HEIGHT}:d=1:r=1",
+            str(background_path),
             "-vf",
             filters,
             "-frames:v",
@@ -766,76 +783,325 @@ def _merge_segments_with_audio(ffmpeg: str, concat_path: Path, voiceover_path: P
     )
 
 
+Color = tuple[int, int, int]
+
+
+def _write_scene_background(
+    story: dict[str, Any],
+    beat: dict[str, str],
+    index: int,
+    total: int,
+    output_path: Path,
+) -> None:
+    scene = _scene_key(story, beat)
+    canvas = _new_gradient((7, 10, 20), (18, 21, 34))
+    if scene == "ocean":
+        _draw_ocean_ship_scene(canvas, index)
+    elif scene == "mountain":
+        _draw_mountain_scene(canvas, index)
+    elif scene == "lighthouse":
+        _draw_lighthouse_scene(canvas, index)
+    elif scene == "haunted":
+        _draw_haunted_scene(canvas, index)
+    elif scene == "beach":
+        _draw_beach_scene(canvas, index)
+    elif scene == "town":
+        _draw_town_scene(canvas, index)
+    else:
+        _draw_history_scene(canvas, index, total)
+    _draw_vignette(canvas)
+    _write_ppm(canvas, output_path)
+
+
+def _scene_key(story: dict[str, Any], beat: dict[str, str]) -> str:
+    slug = str(story.get("slug") or "").lower()
+    title = str(story.get("title") or story.get("short_title") or "").lower()
+    category = str(story.get("category") or "").lower()
+    joined = " ".join([slug, title, category, str(beat.get("narration") or "").lower()])
+    if any(token in joined for token in ("mary-celeste", "empty ship", "ship", "ocean", "atlantic")):
+        return "ocean"
+    if any(token in joined for token in ("dyatlov", "mountain", "hikers", "snow", "ural")):
+        return "mountain"
+    if any(token in joined for token in ("flannan", "lighthouse", "isles")):
+        return "lighthouse"
+    if any(token in joined for token in ("bell-witch", "witch", "haunted", "house", "voice")):
+        return "haunted"
+    if any(token in joined for token in ("tamam", "somerton", "beach", "adelaide", "code")):
+        return "beach"
+    if any(token in joined for token in ("dancing", "strasbourg", "town")):
+        return "town"
+    return "history"
+
+
+def _new_gradient(top: Color, bottom: Color) -> bytearray:
+    canvas = bytearray(SCENE_WIDTH * SCENE_HEIGHT * 3)
+    for y in range(SCENE_HEIGHT):
+        ratio = y / max(1, SCENE_HEIGHT - 1)
+        color = (
+            int(top[0] * (1 - ratio) + bottom[0] * ratio),
+            int(top[1] * (1 - ratio) + bottom[1] * ratio),
+            int(top[2] * (1 - ratio) + bottom[2] * ratio),
+        )
+        row = y * SCENE_WIDTH * 3
+        for x in range(SCENE_WIDTH):
+            offset = row + x * 3
+            canvas[offset : offset + 3] = bytes(color)
+    return canvas
+
+
+def _write_ppm(canvas: bytearray, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(f"P6\n{SCENE_WIDTH} {SCENE_HEIGHT}\n255\n".encode("ascii") + bytes(canvas))
+
+
+def _draw_ocean_ship_scene(canvas: bytearray, index: int) -> None:
+    _draw_rect(canvas, 0, 515, SCENE_WIDTH, 445, (8, 31, 48), 1.0)
+    _draw_circle(canvas, 430, 142, 52, (222, 228, 209), 0.95)
+    _draw_circle(canvas, 406, 130, 54, (7, 10, 20), 0.72)
+    for y in range(560, 930, 48):
+        _draw_line(canvas, 20, y + (index * 9) % 34, 520, y - 18 + (index * 7) % 28, (56, 141, 160), 3, 0.45)
+    _draw_polygon(canvas, [(112, 566), (410, 566), (360, 642), (160, 642)], (22, 20, 18), 1.0)
+    _draw_polygon(canvas, [(152, 560), (246, 360), (246, 560)], (205, 210, 193), 0.88)
+    _draw_polygon(canvas, [(255, 560), (352, 380), (352, 560)], (191, 197, 185), 0.78)
+    _draw_line(canvas, 247, 336, 247, 586, (24, 22, 20), 5, 1.0)
+    _draw_line(canvas, 353, 356, 353, 582, (24, 22, 20), 5, 1.0)
+    _draw_rect(canvas, 0, 470, SCENE_WIDTH, 110, (187, 205, 201), 0.08)
+    _draw_rect(canvas, 0, 700, SCENE_WIDTH, 70, (255, 255, 255), 0.05)
+
+
+def _draw_mountain_scene(canvas: bytearray, index: int) -> None:
+    for x in range(38, 520, 90):
+        _draw_circle(canvas, x, 92 + (x % 40), 2, (230, 238, 255), 0.85)
+    _draw_polygon(canvas, [(0, 575), (142, 270), (292, 575)], (38, 55, 76), 1.0)
+    _draw_polygon(canvas, [(150, 575), (310, 230), (540, 575)], (45, 62, 83), 1.0)
+    _draw_polygon(canvas, [(142, 270), (92, 380), (194, 380)], (218, 226, 231), 0.92)
+    _draw_polygon(canvas, [(310, 230), (245, 376), (384, 374)], (228, 234, 238), 0.90)
+    _draw_rect(canvas, 0, 565, SCENE_WIDTH, 395, (202, 210, 213), 0.88)
+    _draw_polygon(canvas, [(180, 676), (292, 596), (395, 676)], (144, 74, 48), 1.0)
+    _draw_polygon(canvas, [(292, 596), (395, 676), (292, 676)], (181, 96, 54), 0.95)
+    _draw_line(canvas, 292, 596, 292, 676, (56, 31, 25), 4, 1.0)
+    for x in range(70, 500, 58):
+        _draw_line(canvas, x, 734 + (index * 5 + x) % 18, x + 58, 720 + (x % 30), (246, 248, 250), 4, 0.65)
+
+
+def _draw_lighthouse_scene(canvas: bytearray, index: int) -> None:
+    _draw_rect(canvas, 0, 565, SCENE_WIDTH, 395, (5, 32, 45), 1.0)
+    _draw_circle(canvas, 90, 126, 44, (220, 224, 205), 0.86)
+    _draw_polygon(canvas, [(0, 618), (190, 510), (360, 617)], (31, 35, 39), 1.0)
+    _draw_polygon(canvas, [(320, 620), (540, 522), (540, 620)], (26, 32, 36), 1.0)
+    _draw_polygon(canvas, [(350, 228), (438, 228), (460, 625), (324, 625)], (209, 213, 205), 0.96)
+    _draw_rect(canvas, 338, 315, 112, 38, (128, 35, 38), 0.95)
+    _draw_rect(canvas, 332, 422, 122, 38, (128, 35, 38), 0.95)
+    _draw_rect(canvas, 340, 186, 106, 46, (26, 30, 34), 1.0)
+    _draw_circle(canvas, 392, 209, 18, (255, 232, 132), 0.95)
+    _draw_polygon(canvas, [(392, 209), (0, 110 + (index % 3) * 16), (0, 238 + (index % 2) * 18)], (255, 232, 132), 0.20)
+    for y in range(638, 925, 48):
+        _draw_line(canvas, 0, y, 540, y - 34, (76, 137, 153), 4, 0.52)
+
+
+def _draw_haunted_scene(canvas: bytearray, index: int) -> None:
+    _draw_circle(canvas, 404, 134, 58, (224, 221, 190), 0.85)
+    for x in range(0, 560, 55):
+        _draw_rect(canvas, x, 430 - (x % 3) * 30, 18, 300, (8, 17, 20), 0.92)
+        _draw_circle(canvas, x + 9, 405 - (x % 3) * 30, 52, (9, 22, 22), 0.78)
+    _draw_polygon(canvas, [(116, 610), (270, 432), (424, 610)], (38, 30, 33), 1.0)
+    _draw_rect(canvas, 150, 610, 240, 220, (46, 39, 40), 1.0)
+    _draw_polygon(canvas, [(190, 548), (270, 470), (350, 548)], (35, 25, 29), 1.0)
+    for x in (188, 318):
+        _draw_rect(canvas, x, 654, 45, 58, (238, 179, 79), 0.82 if index % 2 else 0.60)
+    _draw_rect(canvas, 254, 724, 48, 106, (15, 12, 13), 1.0)
+    _draw_rect(canvas, 0, 790, SCENE_WIDTH, 170, (5, 10, 11), 0.95)
+
+
+def _draw_beach_scene(canvas: bytearray, index: int) -> None:
+    _draw_rect(canvas, 0, 465, SCENE_WIDTH, 180, (19, 82, 99), 1.0)
+    _draw_rect(canvas, 0, 645, SCENE_WIDTH, 315, (155, 125, 82), 1.0)
+    for y in range(484, 650, 32):
+        _draw_line(canvas, 0, y + (index * 6) % 20, 540, y - 14, (121, 193, 196), 3, 0.48)
+    _draw_polygon(canvas, [(348, 650), (415, 690), (390, 814), (316, 786)], (26, 29, 31), 1.0)
+    _draw_circle(canvas, 375, 621, 30, (47, 38, 34), 1.0)
+    _draw_polygon(canvas, [(118, 704), (250, 675), (278, 752), (140, 780)], (218, 203, 170), 1.0)
+    _draw_line(canvas, 140, 725, 248, 704, (63, 56, 49), 2, 0.45)
+    _draw_line(canvas, 150, 747, 248, 728, (63, 56, 49), 2, 0.35)
+    _draw_rect(canvas, 0, 372, SCENE_WIDTH, 95, (245, 197, 117), 0.22)
+
+
+def _draw_town_scene(canvas: bytearray, index: int) -> None:
+    _draw_rect(canvas, 0, 578, SCENE_WIDTH, 382, (37, 28, 24), 1.0)
+    for x, h in [(18, 250), (96, 315), (188, 270), (292, 338), (400, 284)]:
+        _draw_rect(canvas, x, 578 - h, 80, h, (70, 49, 40), 1.0)
+        _draw_polygon(canvas, [(x - 8, 578 - h), (x + 40, 528 - h), (x + 88, 578 - h)], (108, 45, 38), 1.0)
+        _draw_rect(canvas, x + 22, 615 - h, 20, 28, (239, 172, 77), 0.82)
+    for x in [120, 200, 280, 360, 440]:
+        _draw_circle(canvas, x, 676 + (x + index * 9) % 24, 18, (26, 22, 20), 1.0)
+        _draw_line(canvas, x, 695, x - 22, 765, (23, 20, 19), 5, 1.0)
+        _draw_line(canvas, x, 716, x + 30, 754, (23, 20, 19), 4, 1.0)
+        _draw_line(canvas, x - 6, 756, x - 34, 820, (23, 20, 19), 4, 1.0)
+        _draw_line(canvas, x + 4, 756, x + 36, 820, (23, 20, 19), 4, 1.0)
+
+
+def _draw_history_scene(canvas: bytearray, index: int, total: int) -> None:
+    _draw_rect(canvas, 0, 610, SCENE_WIDTH, 350, (22, 20, 23), 1.0)
+    _draw_polygon(canvas, [(88, 620), (270, 314), (456, 620)], (56, 48, 48), 0.72)
+    _draw_circle(canvas, 270, 470, 72, (20, 18, 20), 1.0)
+    _draw_rect(canvas, 220, 540, 100, 188, (17, 17, 20), 1.0)
+    _draw_polygon(canvas, [(220, 548), (270, 512), (320, 548)], (27, 25, 27), 1.0)
+    for x in (98, 406):
+        _draw_rect(canvas, x, 380, 36, 342, (109, 86, 63), 0.82)
+        _draw_rect(canvas, x - 12, 360, 60, 24, (138, 109, 75), 0.86)
+    _draw_polygon(canvas, [(270, 180), (20, 534), (520, 534)], (226, 188, 83), 0.12)
+    _draw_rect(canvas, 0, 0, SCENE_WIDTH, 120 + (index % max(1, total)) * 8, (102, 34, 38), 0.14)
+
+
+def _draw_vignette(canvas: bytearray) -> None:
+    cx = SCENE_WIDTH / 2
+    cy = SCENE_HEIGHT / 2
+    max_dist = math.hypot(cx, cy)
+    for y in range(SCENE_HEIGHT):
+        row = y * SCENE_WIDTH * 3
+        for x in range(SCENE_WIDTH):
+            dist = math.hypot(x - cx, y - cy) / max_dist
+            alpha = max(0.0, min(0.58, (dist - 0.35) * 0.92))
+            if alpha <= 0:
+                continue
+            offset = row + x * 3
+            canvas[offset] = int(canvas[offset] * (1 - alpha))
+            canvas[offset + 1] = int(canvas[offset + 1] * (1 - alpha))
+            canvas[offset + 2] = int(canvas[offset + 2] * (1 - alpha))
+
+
+def _draw_rect(canvas: bytearray, x: int, y: int, w: int, h: int, color: Color, alpha: float = 1.0) -> None:
+    x1 = max(0, x)
+    y1 = max(0, y)
+    x2 = min(SCENE_WIDTH, x + w)
+    y2 = min(SCENE_HEIGHT, y + h)
+    if x1 >= x2 or y1 >= y2:
+        return
+    for yy in range(y1, y2):
+        row = yy * SCENE_WIDTH * 3
+        for xx in range(x1, x2):
+            _blend_pixel(canvas, row + xx * 3, color, alpha)
+
+
+def _draw_circle(canvas: bytearray, cx: int, cy: int, radius: int, color: Color, alpha: float = 1.0) -> None:
+    r2 = radius * radius
+    for yy in range(max(0, cy - radius), min(SCENE_HEIGHT, cy + radius + 1)):
+        row = yy * SCENE_WIDTH * 3
+        dy2 = (yy - cy) * (yy - cy)
+        for xx in range(max(0, cx - radius), min(SCENE_WIDTH, cx + radius + 1)):
+            if (xx - cx) * (xx - cx) + dy2 <= r2:
+                _blend_pixel(canvas, row + xx * 3, color, alpha)
+
+
+def _draw_polygon(canvas: bytearray, points: list[tuple[int, int]], color: Color, alpha: float = 1.0) -> None:
+    if len(points) < 3:
+        return
+    min_y = max(0, min(y for _, y in points))
+    max_y = min(SCENE_HEIGHT - 1, max(y for _, y in points))
+    for yy in range(min_y, max_y + 1):
+        intersections: list[float] = []
+        previous = points[-1]
+        for current in points:
+            x1, y1 = previous
+            x2, y2 = current
+            if (y1 <= yy < y2) or (y2 <= yy < y1):
+                intersections.append(x1 + (yy - y1) * (x2 - x1) / (y2 - y1))
+            previous = current
+        intersections.sort()
+        row = yy * SCENE_WIDTH * 3
+        for left, right in zip(intersections[0::2], intersections[1::2]):
+            x1 = max(0, int(math.ceil(left)))
+            x2 = min(SCENE_WIDTH - 1, int(math.floor(right)))
+            for xx in range(x1, x2 + 1):
+                _blend_pixel(canvas, row + xx * 3, color, alpha)
+
+
+def _draw_line(
+    canvas: bytearray,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    color: Color,
+    thickness: int = 1,
+    alpha: float = 1.0,
+) -> None:
+    steps = max(abs(x2 - x1), abs(y2 - y1), 1)
+    radius = max(0, thickness // 2)
+    for step in range(steps + 1):
+        ratio = step / steps
+        x = int(round(x1 + (x2 - x1) * ratio))
+        y = int(round(y1 + (y2 - y1) * ratio))
+        _draw_rect(canvas, x - radius, y - radius, max(1, thickness), max(1, thickness), color, alpha)
+
+
+def _blend_pixel(canvas: bytearray, offset: int, color: Color, alpha: float) -> None:
+    if alpha >= 1:
+        canvas[offset] = _clamp(color[0])
+        canvas[offset + 1] = _clamp(color[1])
+        canvas[offset + 2] = _clamp(color[2])
+        return
+    safe_alpha = max(0.0, min(1.0, alpha))
+    inv = 1 - safe_alpha
+    canvas[offset] = _clamp(canvas[offset] * inv + color[0] * safe_alpha)
+    canvas[offset + 1] = _clamp(canvas[offset + 1] * inv + color[1] * safe_alpha)
+    canvas[offset + 2] = _clamp(canvas[offset + 2] * inv + color[2] * safe_alpha)
+
+
+def _clamp(value: float) -> int:
+    return max(0, min(255, int(value)))
+
+
 def _beat_filters(story: dict[str, Any], beat: dict[str, str], *, index: int, total: int, duration: float) -> list[str]:
-    accent = [GREEN, CYAN, AMBER, RED][(index - 1) % 4]
+    accent = [RED, AMBER, CYAN, GREEN][(index - 1) % 4]
     badge = _story_badge(story)
-    story_title = _one_line(str(story.get("title") or story.get("short_title") or "Story"), 36)
+    story_title = _one_line(str(story.get("title") or story.get("short_title") or "Story"), 32)
+    label = _one_line(str(beat.get("label") or "The Moment").upper(), 22)
+    headline = str(beat.get("onscreen_text") or story.get("short_title") or "").upper()
+    headline_lines = _headline_lines(headline)
+    headline_start_y = 1018 - (len(headline_lines) - 1) * 50
     filters = [
-        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color={BG}:t=fill",
-        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color={_fallback_color(index)}@0.25:t=fill",
-        f"drawbox=x='-360+mod(t*150+{index * 90}\\,1700)':y=0:w=260:h={HEIGHT}:color={accent}@0.070:t=fill",
-        f"drawbox=x=0:y=0:w={WIDTH}:h=236:color=black@0.48:t=fill",
-        f"drawbox=x=0:y=1574:w={WIDTH}:h=346:color=black@0.46:t=fill",
-        f"drawbox=x=64:y=92:w=952:h=140:color=black@0.46:t=fill",
-        f"drawbox=x=64:y=92:w=952:h=140:color={accent}@0.32:t=3",
-        _drawtext(badge, 88, 116, 34, accent, max_chars=20, borderw=5),
-        _drawtext(story_title.upper(), 88, 166, 34, "white@0.94", max_chars=36, borderw=5),
-        f"drawbox=x=80:y=316:w=920:h=728:color=black@0.34:t=fill",
-        f"drawbox=x=80:y=316:w=920:h=728:color={_fallback_color(index)}@0.38:t=fill",
-        f"drawbox=x=80:y=316:w=920:h=728:color={accent}@0.24:t=5",
-        f"drawbox=x=128:y=372:w=824:h=96:color=black@0.42:t=fill",
-        _drawtext(_one_line(beat.get("label", "STORY").upper(), 26), 154, 394, 36, accent, max_chars=26, borderw=5),
-        f"drawbox=x=186:y=528:w=708:h=292:color=black@0.20:t=fill",
-        f"drawbox=x=222:y=564:w=288:h=10:color=white@0.12:t=fill",
-        f"drawbox=x=222:y=604:w=412:h=8:color=white@0.09:t=fill",
-        f"drawbox=x=222:y=642:w=354:h=8:color=white@0.08:t=fill",
-        f"drawbox=x=570:y=558:w=164:h=164:color=black@0.22:t=fill",
-        f"drawbox=x=588:y=578:w=128:h=14:color={accent}@0.22:t=fill",
-        f"drawbox=x=588:y=618:w=104:h=8:color=white@0.10:t=fill",
-        f"drawbox=x=588:y=654:w=122:h=8:color=white@0.08:t=fill",
-        f"drawbox=x=322:y=714:w=434:h=4:color={accent}@0.24:t=fill",
-        f"drawbox=x=318:y=700:w=34:h=34:color={accent}@0.28:t=fill",
-        f"drawbox=x=722:y=698:w=38:h=38:color={accent}@0.22:t=fill",
-        f"drawbox=x=264:y=586:w=552:h=176:color={accent}@0.18:t=fill",
-        f"drawbox=x=438:y=480:w=204:h=396:color=white@0.050:t=fill",
-        f"drawbox=x=484:y=432:w=112:h=492:color={accent}@0.38:t=fill",
-        f"drawbox=x='132+mod(t*92\\,760)':y=980:w=260:h=18:color=white@0.16:t=fill",
+        f"scale=1188:2112:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT}:x='(iw-ow)/2+sin(t*0.22+{index})*28':y='(ih-oh)/2+cos(t*0.18+{index})*34',setsar=1,fps={FPS}",
+        "eq=contrast=1.08:saturation=1.12:brightness=-0.018",
+        f"drawbox=x=0:y=0:w={WIDTH}:h=330:color=black@0.36:t=fill",
+        f"drawbox=x=0:y=1500:w={WIDTH}:h=420:color=black@0.42:t=fill",
+        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color={_fallback_color(index)}@0.08:t=fill",
+        f"drawbox=x='-620+mod(t*96+{index * 170}\\,1780)':y=210:w=500:h=92:color=white@0.055:t=fill",
+        f"drawbox=x='-760+mod(t*78+{index * 210}\\,1900)':y=760:w=620:h=74:color=white@0.045:t=fill",
+        f"drawbox=x=52:y=86:w=6:h=96:color={accent}@0.92:t=fill",
+        _drawtext(badge, 78, 82, 30, accent, max_chars=20, borderw=5),
+        _drawtext(story_title.upper(), 78, 128, 34, "white@0.96", max_chars=34, borderw=6),
+        f"drawbox=x=72:y=898:w=936:h=84:color=black@0.35:t=fill",
+        f"drawbox=x=72:y=898:w=936:h=84:color={accent}@0.34:t=4",
+        _drawtext_center(label, 920, 40, accent, max_chars=22, borderw=6),
     ]
-    y = 1102
-    for line in _wrap_text(str(beat.get("onscreen_text") or "").upper(), max_chars=18, max_lines=3):
-        filters.append(_drawtext_center(line, y, 76, WHITE, max_chars=18, borderw=10))
-        y += 90
+    for line_index, line in enumerate(headline_lines):
+        y = headline_start_y + line_index * 86
+        color = RED if line_index == len(headline_lines) - 1 else (AMBER if line_index % 2 else WHITE)
+        filters.append(_drawtext_center(line, y, 82, color, max_chars=18, borderw=11))
+    filters.append(f"drawbox=x='132+mod(t*105\\,816)':y=1246:w=260:h=8:color={accent}@0.55:t=fill")
     filters.extend(_karaoke_caption_filters(beat, duration=duration))
     return filters
 
 
 def _poster_filters(story: dict[str, Any], beat: dict[str, str]) -> list[str]:
     lines = _headline_lines(str(story.get("short_title") or beat.get("onscreen_text") or story.get("title") or "STORY TIME"))
-    start_y = 690 - (len(lines) - 1) * 58
+    start_y = 710 - (len(lines) - 1) * 58
     filters = [
-        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color=0x121015:t=fill",
-        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color={RED}@0.16:t=fill",
-        f"drawbox=x=70:y=270:w=940:h=1130:color={AMBER}@0.10:t=fill",
-        f"drawbox=x=154:y=372:w=360:h=10:color=white@0.12:t=fill",
-        f"drawbox=x=154:y=420:w=520:h=8:color=white@0.08:t=fill",
-        f"drawbox=x=154:y=462:w=450:h=8:color=white@0.07:t=fill",
-        f"drawbox=x=638:y=358:w=210:h=210:color=black@0.20:t=fill",
-        f"drawbox=x=666:y=388:w=154:h=14:color={RED}@0.20:t=fill",
-        f"drawbox=x=666:y=438:w=122:h=8:color=white@0.08:t=fill",
-        f"drawbox=x=666:y=484:w=148:h=8:color=white@0.07:t=fill",
-        f"drawbox=x=0:y=0:w={WIDTH}:h=190:color=black@0.38:t=fill",
-        f"drawbox=x=0:y=1510:w={WIDTH}:h=410:color=black@0.28:t=fill",
-        f"drawbox=x=0:y=0:w=18:h={HEIGHT}:color={RED}@0.88:t=fill",
-        f"drawbox=x={WIDTH - 18}:y=0:w=18:h={HEIGHT}:color={AMBER}@0.80:t=fill",
-        _drawtext("STORY TIME", 70, 64, 34, "white@0.94", max_chars=14, borderw=5),
-        _drawtext(_story_badge(story), 650, 70, 28, "white@0.86", max_chars=18, borderw=4),
+        f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},setsar=1",
+        "eq=contrast=1.10:saturation=1.16:brightness=-0.03",
+        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color=black@0.18:t=fill",
+        f"drawbox=x=0:y=0:w={WIDTH}:h=330:color=black@0.44:t=fill",
+        f"drawbox=x=0:y=1440:w={WIDTH}:h=480:color=black@0.46:t=fill",
+        f"drawbox=x=56:y=90:w=8:h=118:color={RED}@0.95:t=fill",
+        _drawtext("TRUE STORY", 86, 88, 36, RED, max_chars=14, borderw=6),
+        _drawtext(_story_badge(story), 86, 144, 30, "white@0.92", max_chars=20, borderw=5),
     ]
     for line_index, line in enumerate(lines):
         y = start_y + line_index * 128
-        box_color = f"{RED}@0.84" if line_index == len(lines) - 1 else "black@0.62"
-        filters.append(f"drawbox=x=72:y={y - 16}:w=936:h=108:color={box_color}:t=fill")
-        filters.append(_drawtext_center(line, y, 76, WHITE, max_chars=18, borderw=10))
-    filters.append(_drawtext_center("WATCH THE STORY UNFOLD", start_y + len(lines) * 128 + 46, 34, "white@0.90", max_chars=26, borderw=4))
+        color = RED if line_index == len(lines) - 1 else WHITE
+        filters.append(_drawtext_center(line, y, 86, color, max_chars=18, borderw=12))
+    filters.append(_drawtext_center("WATCH UNTIL THE END", start_y + len(lines) * 128 + 62, 38, AMBER, max_chars=22, borderw=6))
     return filters
 
 
