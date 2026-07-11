@@ -22,7 +22,7 @@ SCENE_HEIGHT = 960
 FPS = 30
 MIN_STORY_SECONDS = 64.0
 THUMBNAIL_OUTRO_SECONDS = 0.65
-RENDER_VERSION = "tiktok_story_reel_v5_synced_comic_panels"
+RENDER_VERSION = "tiktok_story_reel_v6_safe_hooked_comic_panels"
 OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
 DEFAULT_IMAGE_SIZE = "1024x1536"
 
@@ -34,23 +34,32 @@ AMBER = "0xffc857"
 RED = "0xff4d5e"
 WHITE = "white"
 MUTED = "0xd8dde5"
-CAPTION_SAFE_LEFT = 48
-CAPTION_SAFE_RIGHT = WIDTH - 48
+CAPTION_SAFE_LEFT = 56
+CAPTION_SAFE_RIGHT = WIDTH - 176
 CAPTION_SAFE_WIDTH = CAPTION_SAFE_RIGHT - CAPTION_SAFE_LEFT
-CAPTION_MIN_FONT_SIZE = 50
+CAPTION_MIN_FONT_SIZE = 44
+CAPTION_WORD_GAP_RATIO = 0.30
 POSTER_SAFE_TEXT_WIDTH = 860
 POSTER_MIN_FONT_SIZE = 54
 
 AI_STORY_DISABLED_VALUES = {"0", "false", "no", "off"}
 GENRE_ROTATION = [
-    "eerie historical mystery",
-    "forgotten disaster story",
-    "folklore horror legend",
-    "ancient mystery",
     "strange true history",
     "survival story",
+    "forgotten historical betrayal",
     "lost place mystery",
+    "folklore legend",
+    "ancient mystery",
     "dark biography",
+    "unbelievable true story",
+    "historical mystery",
+]
+HOOK_OPENERS = [
+    "Did you know this actually happened?",
+    "Have you ever heard this story?",
+    "What if I told you this was real?",
+    "This sounds fake, but it happened.",
+    "You probably never heard this part.",
 ]
 
 TOPIC_LIBRARY: list[dict[str, str]] = [
@@ -357,15 +366,17 @@ def build_story(
     log = logger or (lambda message: None)
     ai_story = _build_ai_story(source_entry, sequence_index=sequence_index, logger=log)
     if ai_story is not None:
-        return ai_story
-    return _build_library_story(source_entry, sequence_index=sequence_index)
+        return _with_opening_hook(ai_story, sequence_index=sequence_index)
+    return _with_opening_hook(_build_library_story(source_entry, sequence_index=sequence_index), sequence_index=sequence_index)
 
 
 def _build_library_story(source_entry: dict[str, Any], *, sequence_index: int) -> dict[str, Any]:
-    story_first_topics = [topic for topic in TOPIC_LIBRARY if topic.get("category")]
-    history_topics = [topic for topic in TOPIC_LIBRARY if not topic.get("category")]
-    rotation = story_first_topics + history_topics
-    topic = rotation[(max(1, sequence_index) - 1) % len(rotation)]
+    lane_index = max(1, sequence_index) - 1
+    lane = GENRE_ROTATION[lane_index % len(GENRE_ROTATION)]
+    candidates = [topic for topic in TOPIC_LIBRARY if _topic_matches_lane(topic, lane)]
+    if not candidates:
+        candidates = list(TOPIC_LIBRARY)
+    topic = candidates[lane_index % len(candidates)]
     beats = _beats_for_topic(topic)
     return {
         "slug": topic["slug"],
@@ -377,6 +388,30 @@ def _build_library_story(source_entry: dict[str, Any], *, sequence_index: int) -
         "story_source": "library",
         "beats": beats,
     }
+
+
+def _topic_matches_lane(topic: dict[str, str], lane: str) -> bool:
+    category = str(topic.get("category") or "true history story").lower()
+    title = str(topic.get("title") or "").lower()
+    haystack = f"{category} {title} {topic.get('slug', '')}".lower()
+    lane_lower = lane.lower()
+    if "survival" in lane_lower:
+        return "survival" in haystack or "disaster" in haystack
+    if "lost place" in lane_lower:
+        return "lost" in haystack or "lighthouse" in haystack
+    if "folklore" in lane_lower:
+        return "folklore" in haystack or "legend" in haystack or "horror" in haystack
+    if "ancient" in lane_lower:
+        return "ancient" in haystack or "prophet" in haystack or "kingdom" in haystack
+    if "biography" in lane_lower:
+        return "biography" in haystack or (not topic.get("category") and any(word in title for word in ("president", "prime minister", "leader")))
+    if "unbelievable" in lane_lower:
+        return "strange" in haystack or "dancing" in haystack or "could not stop" in haystack
+    if "mystery" in lane_lower:
+        return "mystery" in haystack or "vanished" in haystack or "nobody" in haystack
+    if "history" in lane_lower or "betrayal" in lane_lower:
+        return "history" in haystack or not topic.get("category")
+    return True
 
 
 def _build_ai_story(
@@ -443,7 +478,8 @@ def _ai_story_prompt(source_entry: dict[str, Any], *, sequence_index: int, genre
         "- 8 beats exactly.\n"
         "- Each beat narration is 16 to 27 spoken words, simple and punchy.\n"
         "- Total script should feel like a 60 to 75 second story.\n"
-        "- Start with a curiosity hook, then setup, pressure, turn, consequence, final sting.\n"
+        "- First beat narration must begin with a curiosity hook like: Did you know this actually happened? / Have you ever heard this story? / What if I told you this was real?\n"
+        "- Then continue with setup, pressure, turn, consequence, final sting.\n"
         "- Use a real, widely known historical/folklore subject. Do not invent disasters, causes, dates, or places.\n"
         "- If the story is folklore or horror, clearly frame it as legend, rumor, or alleged haunting.\n"
         "- No franchise characters, no graphic gore, no modern crime allegations.\n"
@@ -522,6 +558,35 @@ def _with_fallback_visual_for_story(beat: dict[str, str], index: int, *, title: 
     if category:
         enriched["visual"] = f"{enriched['visual']} Category mood: {category}."
     return enriched
+
+
+def _with_opening_hook(story: dict[str, Any], *, sequence_index: int) -> dict[str, Any]:
+    beats = [dict(beat) for beat in story.get("beats") or [] if isinstance(beat, dict)]
+    if not beats:
+        return story
+    first = dict(beats[0])
+    narration = _clean(first.get("narration"))
+    if narration and not _starts_with_curiosity_hook(narration):
+        opener = HOOK_OPENERS[(max(1, sequence_index) - 1) % len(HOOK_OPENERS)]
+        first["narration"] = f"{opener} {narration}"
+        first["label"] = _clean(first.get("label") or "The Hook") or "The Hook"
+    beats[0] = first
+    enriched = dict(story)
+    enriched["beats"] = beats
+    return enriched
+
+
+def _starts_with_curiosity_hook(text: str) -> bool:
+    lowered = text.strip().lower()
+    starters = (
+        "did you know",
+        "have you ever",
+        "have you heard",
+        "what if i told you",
+        "this sounds fake",
+        "you probably never",
+    )
+    return any(lowered.startswith(starter) for starter in starters)
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
@@ -1298,9 +1363,6 @@ def _beat_filters(story: dict[str, Any], beat: dict[str, str], *, index: int, to
             f"y='(ih-oh)/2+42*cos(t*0.36+{index})',"
             f"setsar=1,fps={FPS},eq=contrast=1.13:saturation=1.30:brightness=0.025,unsharp=5:5:0.55"
         ),
-        f"drawbox=x='-260+mod(t*210+{index * 90}\\,1600)':y=0:w=180:h={HEIGHT}:color={AMBER}@0.085:t=fill",
-        f"drawbox=x=0:y='mod(t*260+{index * 140}\\,1920)':w={WIDTH}:h=5:color=white@0.16:t=fill",
-        f"drawbox=x=0:y='mod(t*155+{index * 220}\\,1920)':w={WIDTH}:h=3:color={CYAN}@0.12:t=fill",
         _drawtext(_story_brand(), 742, 64, 24, "white@0.86", max_chars=20, borderw=3),
         _drawtext(
             _one_line(str(story.get("short_title") or ""), 34),
@@ -1312,8 +1374,6 @@ def _beat_filters(story: dict[str, Any], beat: dict[str, str], *, index: int, to
             borderw=3,
         ),
     ]
-    if index == 1:
-        filters.extend(_glitch_hook_filters())
     filters.extend(_karaoke_caption_filters(beat, duration=duration, index=index))
     return filters
 
@@ -1373,17 +1433,12 @@ def _story_brand() -> str:
 
 
 def _glitch_hook_filters() -> list[str]:
-    return [
-        f"drawbox=x=0:y=232:w={WIDTH}:h=12:color={CYAN}@0.70:t=fill:enable='between(t\\,0.05\\,0.18)'",
-        f"drawbox=x=64:y=612:w=820:h=18:color={RED}@0.68:t=fill:enable='between(t\\,0.14\\,0.24)'",
-        f"drawbox=x=180:y=1338:w=780:h=14:color={CYAN}@0.58:t=fill:enable='between(t\\,0.25\\,0.38)'",
-        f"drawbox=x=0:y=0:w={WIDTH}:h={HEIGHT}:color=white@0.10:t=fill:enable='between(t\\,0.00\\,0.05)'",
-    ]
+    return []
 
 
 def _karaoke_caption_filters(beat: dict[str, str], *, duration: float, index: int) -> list[str]:
     text = str(beat.get("narration") or beat.get("onscreen_text") or beat.get("label") or "")
-    groups = _caption_word_groups(text.upper(), max_words=4)
+    groups = _caption_word_groups(text.upper(), max_words=3)
     flat_words = [word for group in groups for word in group]
     timing_windows = _word_timing_windows(flat_words, duration)
     filters: list[str] = []
@@ -1408,16 +1463,17 @@ def _karaoke_caption_filters(beat: dict[str, str], *, duration: float, index: in
         group_window_index = 0
         for line_index, line_words in enumerate(lines):
             y = y_start + line_index * line_gap
-            line_text = " ".join(line_words)
-            line_width = _text_width(line_text, size)
+            line_width = _caption_line_width(line_words, size)
             x = _safe_caption_x(line_width)
-            filters.append(_drawtext(line_text, x, y, size, WHITE, max_chars=120, borderw=10, enable=group_enable))
+            word_slots = _caption_line_slots(line_words, size)
             for word_index, word in enumerate(line_words):
                 safe_word = _caption_display_word(word)
                 start, end = group_windows[group_window_index] if group_window_index < len(group_windows) else (0.0, duration)
-                prefix = " ".join(line_words[:word_index])
-                raw_word_x = x + (_text_width(f"{prefix} ", size) if prefix else 0)
-                filters.append(_drawtext(safe_word, int(raw_word_x), y, size, RED, max_chars=18, borderw=3, enable=_between(start, end)))
+                word_x = x + word_slots[word_index][0]
+                active_enable = _between(start, end)
+                inactive_enable = f"{group_enable}*not({active_enable})"
+                filters.append(_drawtext(safe_word, word_x, y, size, WHITE, max_chars=18, borderw=8, enable=inactive_enable))
+                filters.append(_drawtext(safe_word, word_x, y, size, RED, max_chars=18, borderw=4, enable=active_enable))
                 group_window_index += 1
     if index == 1:
         filters.append(_drawtext_center("REAL STORY", first_caption_y - 78, 32, "white@0.86", max_chars=16, borderw=4))
@@ -1470,7 +1526,7 @@ def _caption_group_lines(words: list[str], *, size: int) -> list[list[str]]:
         return [["STORY"]]
     lines: list[list[str]] = []
     while remaining:
-        if len(remaining) == 1 or _text_width(" ".join(remaining), size) <= CAPTION_SAFE_WIDTH:
+        if len(remaining) == 1 or _caption_line_width(remaining, size) <= CAPTION_SAFE_WIDTH:
             lines.append(remaining)
             break
         split = _caption_split_index(remaining, size)
@@ -1483,8 +1539,8 @@ def _caption_split_index(words: list[str], size: int) -> int:
     best_split = 1
     best_score = float("inf")
     for split in range(1, len(words)):
-        first_width = _text_width(" ".join(words[:split]), size)
-        second_width = _text_width(" ".join(words[split:]), size)
+        first_width = _caption_line_width(words[:split], size)
+        second_width = _caption_line_width(words[split:], size)
         overflow = max(0, first_width - CAPTION_SAFE_WIDTH) + max(0, second_width - CAPTION_SAFE_WIDTH)
         balance = abs(first_width - second_width) * 0.15
         score = overflow * 10 + max(first_width, second_width) + balance
@@ -1497,7 +1553,7 @@ def _caption_split_index(words: list[str], size: int) -> int:
 def _caption_fitted_font_size(lines: list[list[str]], preferred_size: int) -> int:
     size = preferred_size
     while size > CAPTION_MIN_FONT_SIZE:
-        if all(_text_width(" ".join(line), size) <= CAPTION_SAFE_WIDTH for line in lines):
+        if all(_caption_line_width(line, size) <= CAPTION_SAFE_WIDTH for line in lines):
             return size
         size -= 4
     return size
@@ -1510,13 +1566,34 @@ def _caption_display_word(word: str) -> str:
 def _safe_caption_x(line_width: int) -> int:
     if line_width >= CAPTION_SAFE_WIDTH:
         return CAPTION_SAFE_LEFT
-    return max(CAPTION_SAFE_LEFT, min(CAPTION_SAFE_RIGHT - line_width, int((WIDTH - line_width) / 2)))
+    return CAPTION_SAFE_LEFT + int((CAPTION_SAFE_WIDTH - line_width) / 2)
 
 
 def _caption_group_layout(line_count: int) -> tuple[int, int, int]:
     if line_count <= 1:
-        return 1304, 72, 86
-    return 1228, 66, 82
+        return 1302, 64, 78
+    if line_count == 2:
+        return 1228, 58, 72
+    return 1160, 52, 66
+
+
+def _caption_line_width(words: list[str], size: int) -> int:
+    slots = _caption_line_slots(words, size)
+    if not slots:
+        return 0
+    last_x, last_width = slots[-1]
+    return last_x + last_width
+
+
+def _caption_line_slots(words: list[str], size: int) -> list[tuple[int, int]]:
+    gap = max(12, int(size * CAPTION_WORD_GAP_RATIO))
+    cursor = 0
+    slots: list[tuple[int, int]] = []
+    for word in words:
+        width = _text_width(_caption_display_word(word), size)
+        slots.append((cursor, width))
+        cursor += width + gap
+    return slots
 
 
 def _word_timing_windows(words: list[str], duration: float) -> list[tuple[float, float]]:
