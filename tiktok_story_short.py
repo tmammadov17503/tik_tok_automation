@@ -22,7 +22,7 @@ SCENE_HEIGHT = 960
 FPS = 30
 MIN_STORY_SECONDS = 64.0
 THUMBNAIL_OUTRO_SECONDS = 0.65
-RENDER_VERSION = "tiktok_story_reel_v6_safe_hooked_comic_panels"
+RENDER_VERSION = "tiktok_story_reel_v7_validated_caption_slots"
 OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
 DEFAULT_IMAGE_SIZE = "1024x1536"
 
@@ -37,8 +37,13 @@ MUTED = "0xd8dde5"
 CAPTION_SAFE_LEFT = 56
 CAPTION_SAFE_RIGHT = WIDTH - 176
 CAPTION_SAFE_WIDTH = CAPTION_SAFE_RIGHT - CAPTION_SAFE_LEFT
+CAPTION_MAX_WORDS = 2
 CAPTION_MIN_FONT_SIZE = 44
-CAPTION_WORD_GAP_RATIO = 0.30
+CAPTION_WORD_GAP_RATIO = 0.72
+CAPTION_MIN_WORD_GAP = 46
+CAPTION_SLOT_RIGHT_PAD = 10
+CAPTION_OUTLINE_WIDTH = 5
+CAPTION_ACTIVE_OUTLINE_WIDTH = 4
 POSTER_SAFE_TEXT_WIDTH = 860
 POSTER_MIN_FONT_SIZE = 54
 
@@ -315,6 +320,7 @@ def generate_tiktok_story_clip(
     log(f"Generating original English story voiceover: {story['title']}.")
     _generate_openai_voiceover(story_narration_text(story), voiceover_path, logger=log)
     render_story_video(story, voiceover_path, video_path, poster_path, logger=log)
+    layout_validation_path = validate_story_video_layout(story, video_path, output_dir, logger=log)
 
     segments = [
         {
@@ -339,6 +345,7 @@ def generate_tiktok_story_clip(
         "caption_style": "lower_story_karaoke_captions_red_words",
         "poster_style": "thumbnail_safe_final_outro",
         "thumbnail_outro_seconds": THUMBNAIL_OUTRO_SECONDS,
+        "layout_validation": str(layout_validation_path),
         "duration_seconds": round(_media_duration(video_path), 2),
         "voiceover": str(voiceover_path),
         "video": str(video_path),
@@ -647,6 +654,51 @@ def render_story_video(
     concat_path = output_dir / "concat.txt"
     concat_path.write_text(_concat_file(segment_paths), encoding="utf-8")
     _merge_segments_with_audio(ffmpeg, concat_path, voiceover_path, video_path, story_duration + thumbnail_outro_seconds)
+
+
+def validate_story_video_layout(
+    story: dict[str, Any],
+    video_path: Path,
+    output_dir: Path,
+    *,
+    logger: Callable[[str], None] | None = None,
+) -> Path:
+    report_path = output_dir / "layout_validation.json"
+    log = logger or (lambda message: None)
+    disabled = os.getenv("TIKTOK_STORY_VALIDATE_LAYOUT", "true").strip().lower() in AI_STORY_DISABLED_VALUES
+    issues = [] if disabled else _caption_layout_issues(story)
+    frames: list[str] = []
+    frame_errors: list[str] = []
+    if not disabled:
+        ffmpeg = _ffmpeg()
+        if ffmpeg and video_path.exists():
+            try:
+                frames = [str(path) for path in _extract_validation_frames(ffmpeg, video_path, output_dir)]
+            except Exception as exc:
+                frame_errors.append(str(exc)[:500])
+    report = {
+        "ok": not issues,
+        "skipped": disabled,
+        "render_version": RENDER_VERSION,
+        "video": str(video_path),
+        "caption_safe_left": CAPTION_SAFE_LEFT,
+        "caption_safe_right": CAPTION_SAFE_RIGHT,
+        "caption_safe_width": CAPTION_SAFE_WIDTH,
+        "caption_max_words": CAPTION_MAX_WORDS,
+        "caption_min_word_gap": CAPTION_MIN_WORD_GAP,
+        "issues": issues,
+        "validation_frames": frames,
+        "frame_errors": frame_errors,
+        "created_at": _utc_now(),
+    }
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if issues:
+        raise RuntimeError(f"Story caption layout validation failed; see {report_path}")
+    if disabled:
+        log("Story layout validation skipped by TIKTOK_STORY_VALIDATE_LAYOUT.")
+    else:
+        log(f"Story layout validation passed: {report_path.name}.")
+    return report_path
 
 
 def story_narration_text(story: dict[str, Any]) -> str:
@@ -1436,9 +1488,67 @@ def _glitch_hook_filters() -> list[str]:
     return []
 
 
+def _caption_layout_issues(story: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    beats = [beat for beat in story.get("beats") or [] if isinstance(beat, dict)]
+    for beat_index, beat in enumerate(beats, start=1):
+        text = str(beat.get("narration") or beat.get("onscreen_text") or beat.get("label") or "")
+        groups = _caption_word_groups(text.upper(), max_words=CAPTION_MAX_WORDS)
+        for group_index, group in enumerate(groups, start=1):
+            draw_group = [_caption_display_word(word) for word in group]
+            lines = _caption_group_lines(draw_group, size=72)
+            _, size, _ = _caption_group_layout(len(lines))
+            lines = _caption_group_lines(draw_group, size=size)
+            size = _caption_fitted_font_size(lines, size)
+            for line_index, line_words in enumerate(lines, start=1):
+                line_width = _caption_line_width(line_words, size)
+                if len(line_words) > CAPTION_MAX_WORDS:
+                    issues.append(
+                        {
+                            "type": "too_many_words",
+                            "beat": beat_index,
+                            "group": group_index,
+                            "line": line_index,
+                            "words": line_words,
+                            "max_words": CAPTION_MAX_WORDS,
+                        }
+                    )
+                if line_width > CAPTION_SAFE_WIDTH:
+                    issues.append(
+                        {
+                            "type": "line_overflow",
+                            "beat": beat_index,
+                            "group": group_index,
+                            "line": line_index,
+                            "words": line_words,
+                            "line_width": line_width,
+                            "safe_width": CAPTION_SAFE_WIDTH,
+                            "font_size": size,
+                        }
+                    )
+                slots = _caption_line_slots(line_words, size)
+                for slot_index in range(1, len(slots)):
+                    previous_end = slots[slot_index - 1][0] + slots[slot_index - 1][1]
+                    gap = slots[slot_index][0] - previous_end
+                    if gap < CAPTION_MIN_WORD_GAP:
+                        issues.append(
+                            {
+                                "type": "word_gap_too_small",
+                                "beat": beat_index,
+                                "group": group_index,
+                                "line": line_index,
+                                "words": line_words,
+                                "gap": gap,
+                                "min_gap": CAPTION_MIN_WORD_GAP,
+                                "font_size": size,
+                            }
+                        )
+    return issues
+
+
 def _karaoke_caption_filters(beat: dict[str, str], *, duration: float, index: int) -> list[str]:
     text = str(beat.get("narration") or beat.get("onscreen_text") or beat.get("label") or "")
-    groups = _caption_word_groups(text.upper(), max_words=3)
+    groups = _caption_word_groups(text.upper(), max_words=CAPTION_MAX_WORDS)
     flat_words = [word for group in groups for word in group]
     timing_windows = _word_timing_windows(flat_words, duration)
     filters: list[str] = []
@@ -1470,10 +1580,32 @@ def _karaoke_caption_filters(beat: dict[str, str], *, duration: float, index: in
                 safe_word = _caption_display_word(word)
                 start, end = group_windows[group_window_index] if group_window_index < len(group_windows) else (0.0, duration)
                 word_x = x + word_slots[word_index][0]
-                active_enable = _between(start, end)
+                active_enable = f"{group_enable}*{_between(start, end)}"
                 inactive_enable = f"{group_enable}*not({active_enable})"
-                filters.append(_drawtext(safe_word, word_x, y, size, WHITE, max_chars=18, borderw=8, enable=inactive_enable))
-                filters.append(_drawtext(safe_word, word_x, y, size, RED, max_chars=18, borderw=4, enable=active_enable))
+                filters.append(
+                    _drawtext(
+                        safe_word,
+                        word_x,
+                        y,
+                        size,
+                        WHITE,
+                        max_chars=18,
+                        borderw=CAPTION_OUTLINE_WIDTH,
+                        enable=inactive_enable,
+                    )
+                )
+                filters.append(
+                    _drawtext(
+                        safe_word,
+                        word_x,
+                        y,
+                        size,
+                        RED,
+                        max_chars=18,
+                        borderw=CAPTION_ACTIVE_OUTLINE_WIDTH,
+                        enable=active_enable,
+                    )
+                )
                 group_window_index += 1
     if index == 1:
         filters.append(_drawtext_center("REAL STORY", first_caption_y - 78, 32, "white@0.86", max_chars=16, borderw=4))
@@ -1586,11 +1718,11 @@ def _caption_line_width(words: list[str], size: int) -> int:
 
 
 def _caption_line_slots(words: list[str], size: int) -> list[tuple[int, int]]:
-    gap = max(12, int(size * CAPTION_WORD_GAP_RATIO))
+    gap = max(CAPTION_MIN_WORD_GAP, int(size * CAPTION_WORD_GAP_RATIO))
     cursor = 0
     slots: list[tuple[int, int]] = []
     for word in words:
-        width = _text_width(_caption_display_word(word), size)
+        width = _text_width(_caption_display_word(word), size) + CAPTION_SLOT_RIGHT_PAD
         slots.append((cursor, width))
         cursor += width + gap
     return slots
@@ -1626,7 +1758,8 @@ def _word_timing_weight(word: str) -> float:
 
 
 def _between(start: float, end: float) -> str:
-    return f"between(t\\,{start:.2f}\\,{end:.2f})"
+    safe_end = max(start + 0.01, end)
+    return f"gte(t\\,{start:.2f})*lt(t\\,{safe_end:.2f})"
 
 
 def _drawtext(
@@ -1791,6 +1924,38 @@ def _media_duration(path: Path) -> float:
         return max(0.1, float((completed.stdout or "").strip() or "0"))
     except ValueError:
         return MIN_STORY_SECONDS
+
+
+def _extract_validation_frames(ffmpeg: str, video_path: Path, output_dir: Path) -> list[Path]:
+    frame_dir = output_dir / "validation_frames"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    duration = _media_duration(video_path)
+    if duration <= 1.0:
+        timestamps = [0.0]
+    else:
+        latest = max(0.2, duration - 0.35)
+        timestamps = [min(latest, max(0.15, duration * ratio)) for ratio in (0.18, 0.5, 0.82)]
+    frame_paths: list[Path] = []
+    for index, timestamp in enumerate(timestamps, start=1):
+        frame_path = frame_dir / f"frame_{index:02d}.jpg"
+        _run(
+            [
+                ffmpeg,
+                "-y",
+                "-ss",
+                f"{timestamp:.2f}",
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(frame_path),
+            ],
+            timeout=90,
+        )
+        frame_paths.append(frame_path)
+    return frame_paths
 
 
 def _concat_file(paths: list[Path]) -> str:
