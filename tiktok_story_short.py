@@ -22,9 +22,11 @@ SCENE_HEIGHT = 960
 FPS = 30
 MIN_STORY_SECONDS = 64.0
 THUMBNAIL_OUTRO_SECONDS = 0.65
-RENDER_VERSION = "tiktok_story_reel_v7_validated_caption_slots"
+RENDER_VERSION = "tiktok_story_reel_v8_varied_lanes_elevenlabs_balanced_captions"
 OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
+ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 DEFAULT_IMAGE_SIZE = "1024x1536"
+DEFAULT_ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
 BG = "0x070911"
 PANEL = "0x101820"
@@ -37,11 +39,11 @@ MUTED = "0xd8dde5"
 CAPTION_SAFE_LEFT = 56
 CAPTION_SAFE_RIGHT = WIDTH - 176
 CAPTION_SAFE_WIDTH = CAPTION_SAFE_RIGHT - CAPTION_SAFE_LEFT
-CAPTION_MAX_WORDS = 2
+CAPTION_MAX_WORDS = 3
 CAPTION_MIN_FONT_SIZE = 44
-CAPTION_WORD_GAP_RATIO = 0.72
-CAPTION_MIN_WORD_GAP = 46
-CAPTION_SLOT_RIGHT_PAD = 10
+CAPTION_WORD_GAP_RATIO = 0.34
+CAPTION_MIN_WORD_GAP = 26
+CAPTION_SLOT_RIGHT_PAD = 6
 CAPTION_OUTLINE_WIDTH = 5
 CAPTION_ACTIVE_OUTLINE_WIDTH = 4
 POSTER_SAFE_TEXT_WIDTH = 860
@@ -49,6 +51,14 @@ POSTER_MIN_FONT_SIZE = 54
 
 AI_STORY_DISABLED_VALUES = {"0", "false", "no", "off"}
 GENRE_ROTATION = [
+    "history shock",
+    "mystery story",
+    "lawsuit story",
+    "court case",
+    "reddit-style storytime",
+    "cat animation",
+    "world economy story",
+    "2d animation moral story",
     "strange true history",
     "survival story",
     "forgotten historical betrayal",
@@ -67,7 +77,7 @@ HOOK_OPENERS = [
     "You probably never heard this part.",
 ]
 
-TOPIC_LIBRARY: list[dict[str, str]] = [
+TOPIC_LIBRARY: list[dict[str, Any]] = [
     {
         "slug": "mosaddegh-1953-iran",
         "short_title": "REMOVED FOR OIL",
@@ -270,6 +280,348 @@ TOPIC_LIBRARY: list[dict[str, str]] = [
         "hook": "A man was found by the beach with a secret phrase hidden in his clothes.",
         "category": "historical mystery",
     },
+    {
+        "slug": "hot-coffee-lawsuit-1994",
+        "short_title": "THE LAWSUIT TWIST",
+        "title": "The Hot Coffee Lawsuit People Remember Wrong",
+        "hook": "Everyone jokes about this lawsuit, but the real courtroom details were much darker.",
+        "category": "lawsuit story",
+        "beats": [
+            {
+                "label": "The Hook",
+                "narration": "Everyone jokes about this lawsuit, but the real courtroom details were much darker than the punchline people repeat.",
+                "onscreen_text": "THE JOKE WAS WRONG",
+                "visual": "1990s courtroom hallway, coffee cup evidence, newspaper headlines, serious jurors, dramatic comic style",
+            },
+            {
+                "label": "The Spill",
+                "narration": "A woman ordered coffee, the cup spilled, and the burns became severe enough to send the case into court.",
+                "onscreen_text": "ONE CUP CHANGED EVERYTHING",
+                "visual": "restaurant parking lot scene with spilled coffee, medical papers, shocked family, no graphic injury",
+            },
+            {
+                "label": "The Evidence",
+                "narration": "The argument was not just that coffee was hot. The argument was about temperature, warnings, and repeated complaints.",
+                "onscreen_text": "THE DETAILS MATTERED",
+                "visual": "lawyer presenting temperature chart and complaint files on a courtroom board",
+            },
+            {
+                "label": "The Public",
+                "narration": "Outside court, the story became a joke about greedy lawsuits before most people heard the evidence.",
+                "onscreen_text": "THE STORY GOT FLIPPED",
+                "visual": "television screens and newspaper cartoons turning a serious case into a public joke",
+            },
+            {
+                "label": "The Verdict",
+                "narration": "The jury heard the facts and made a decision that sounded shocking only after the context disappeared.",
+                "onscreen_text": "CONTEXT DISAPPEARED",
+                "visual": "jury box under warm courtroom lights, judge bench, evidence folders",
+            },
+            {
+                "label": "The Lesson",
+                "narration": "The case became famous because people remembered the headline, not the injuries, warnings, or legal reasoning.",
+                "onscreen_text": "HEADLINES WON",
+                "visual": "split scene: bold headline on one side, quiet court documents on the other",
+            },
+            {
+                "label": "The Myth",
+                "narration": "For years, it was used as proof that courts were ridiculous, even though the facts were more complicated.",
+                "onscreen_text": "THE MYTH STUCK",
+                "visual": "mythic oversized coffee cup casting shadow over court records",
+            },
+            {
+                "label": "The Sting",
+                "narration": "That is the strange part: one misunderstood lawsuit changed how millions of people talk about justice.",
+                "onscreen_text": "JUSTICE BECAME A MEME",
+                "visual": "final comic portrait of a courtroom turning into a viral media storm",
+            },
+        ],
+    },
+    {
+        "slug": "miranda-rights-1966",
+        "short_title": "THE WORDS POLICE SAY",
+        "title": "The Court Case Behind The Words Police Say",
+        "hook": "A criminal case changed the words millions of people now hear before questioning.",
+        "category": "court case",
+        "beats": [
+            {
+                "label": "The Hook",
+                "narration": "A criminal case changed the words millions of people now hear before questioning begins.",
+                "onscreen_text": "THE WARNING WAS BORN",
+                "visual": "1960s police station corridor, interrogation room door, legal papers under harsh light",
+            },
+            {
+                "label": "The Arrest",
+                "narration": "The case started with an arrest, questioning, and a confession that later became the center of a constitutional fight.",
+                "onscreen_text": "ONE CONFESSION MATTERED",
+                "visual": "detectives at a desk, statement paper, clock on wall, restrained courtroom mood",
+            },
+            {
+                "label": "The Question",
+                "narration": "The question was simple but huge: did a suspect understand the right to stay silent and ask for counsel?",
+                "onscreen_text": "DID HE KNOW?",
+                "visual": "Supreme Court stairs, question mark made from law books, dramatic ink shading",
+            },
+            {
+                "label": "The Court",
+                "narration": "The Supreme Court said rights cannot be real if people are never clearly told they have them.",
+                "onscreen_text": "RIGHTS NEED WORDS",
+                "visual": "judges' bench, bright beam of light on the Bill of Rights",
+            },
+            {
+                "label": "The Rule",
+                "narration": "After that decision, warnings became part of police procedure across the United States.",
+                "onscreen_text": "THE RULE SPREAD",
+                "visual": "map of the United States with police notepads and court seals, no readable text",
+            },
+            {
+                "label": "The Twist",
+                "narration": "The original defendant's story did not become clean or heroic, but the legal rule became permanent.",
+                "onscreen_text": "THE TWIST STAYED",
+                "visual": "shadowed figure behind courthouse columns, legal rule glowing in foreground",
+            },
+            {
+                "label": "The Culture",
+                "narration": "Television turned the warning into a phrase almost everyone recognizes, even outside real courtrooms.",
+                "onscreen_text": "TV MADE IT FAMOUS",
+                "visual": "old television set showing police lights and a courtroom silhouette",
+            },
+            {
+                "label": "The Sting",
+                "narration": "That is why a single case still echoes every time someone says, you have the right to remain silent.",
+                "onscreen_text": "ONE CASE ECHOES",
+                "visual": "final cinematic courthouse at night, words represented as glowing abstract lines",
+            },
+        ],
+    },
+    {
+        "slug": "tulip-mania-1637",
+        "short_title": "THE FLOWER BUBBLE",
+        "title": "The Flower Bubble That Looked Like Free Money",
+        "hook": "A flower became so valuable that people started treating it like a fortune machine.",
+        "category": "world economy story",
+        "beats": [
+            {
+                "label": "The Hook",
+                "narration": "A flower became so valuable that people started treating it like a fortune machine.",
+                "onscreen_text": "A FLOWER GOT EXPENSIVE",
+                "visual": "Dutch market in the 1600s, glowing tulip bulb on a table, merchants whispering",
+            },
+            {
+                "label": "The Market",
+                "narration": "In the Dutch Republic, rare tulip bulbs became status symbols, collectibles, and speculative bets.",
+                "onscreen_text": "STATUS TURNED INTO MONEY",
+                "visual": "busy canal market, tulip catalog, wealthy buyers studying rare bulbs",
+            },
+            {
+                "label": "The Fever",
+                "narration": "Prices rose because people believed someone else would always pay even more later.",
+                "onscreen_text": "EVERYONE EXPECTED MORE",
+                "visual": "price chart climbing like a vine, crowd reaching toward a tulip",
+            },
+            {
+                "label": "The Contracts",
+                "narration": "Some trades were not even for flowers in hand, but promises about future bulbs.",
+                "onscreen_text": "PROMISES GOT TRADED",
+                "visual": "contracts, wax seals, empty flower pot, nervous hands signing papers",
+            },
+            {
+                "label": "The Break",
+                "narration": "Then confidence cracked, buyers vanished, and prices stopped making sense in reverse.",
+                "onscreen_text": "CONFIDENCE BROKE",
+                "visual": "market stall suddenly empty, papers blowing through a canal street",
+            },
+            {
+                "label": "The Lesson",
+                "narration": "The story became a warning about bubbles, hype, and the dangerous phrase: this time is different.",
+                "onscreen_text": "HYPE HAS A PRICE",
+                "visual": "giant tulip shadow over modern stock chart silhouettes",
+            },
+            {
+                "label": "The Echo",
+                "narration": "Centuries later, people still compare new manias to those bulbs because the pattern feels familiar.",
+                "onscreen_text": "THE PATTERN REPEATS",
+                "visual": "tulip bulb beside coins, screens, and abstract market candles",
+            },
+            {
+                "label": "The Sting",
+                "narration": "The object changes, but the human dream stays the same: buy before everyone else believes.",
+                "onscreen_text": "THE DREAM STAYS",
+                "visual": "final surreal tulip blooming into coins and fading into smoke",
+            },
+        ],
+    },
+    {
+        "slug": "forum-wallet-confession",
+        "short_title": "THE WALLET TEST",
+        "title": "The Online Confession About A Wallet",
+        "hook": "This is an original forum-style story about one wallet and a decision that would not leave him alone.",
+        "category": "reddit-style storytime",
+        "beats": [
+            {
+                "label": "The Hook",
+                "narration": "This is an original forum-style story about one wallet and a decision that would not leave him alone.",
+                "onscreen_text": "THE WALLET TEST",
+                "visual": "phone screen glowing in a dark bedroom, anonymous confession post, wallet on desk",
+            },
+            {
+                "label": "The Find",
+                "narration": "He found the wallet under a cafe table, thick with cash and one photo tucked behind the cards.",
+                "onscreen_text": "HE FOUND CASH",
+                "visual": "small cafe table, wallet half hidden, rain on window, cinematic 2D style",
+            },
+            {
+                "label": "The Temptation",
+                "narration": "Rent was due, his account was nearly empty, and for ten seconds the wallet felt like an answer.",
+                "onscreen_text": "RENT WAS DUE",
+                "visual": "apartment bills, empty bank app, hand hovering over wallet",
+            },
+            {
+                "label": "The Photo",
+                "narration": "Then he saw the photo: an old man smiling beside someone who looked exactly like the cashier.",
+                "onscreen_text": "THE PHOTO HIT",
+                "visual": "close-up of worn family photo, cafe cashier blurred in background",
+            },
+            {
+                "label": "The Choice",
+                "narration": "He walked to the counter, handed it over, and tried to act like the choice had been easy.",
+                "onscreen_text": "HE HANDED IT BACK",
+                "visual": "cashier receiving wallet, quiet cafe, warm light and awkward silence",
+            },
+            {
+                "label": "The Message",
+                "narration": "That night, a message arrived from a stranger saying the wallet belonged to her father.",
+                "onscreen_text": "A MESSAGE ARRIVED",
+                "visual": "phone notification, dark room, single lamp, emotional comic panel",
+            },
+            {
+                "label": "The Twist",
+                "narration": "She said the cash was for medicine, and the photo was the last one her mother ever took.",
+                "onscreen_text": "THE CASH HAD A REASON",
+                "visual": "medicine bag, old photograph, soft dramatic shadows",
+            },
+            {
+                "label": "The Sting",
+                "narration": "He wrote that post because doing the right thing still scared him, and that part felt honest.",
+                "onscreen_text": "HONESTY WAS HEAVY",
+                "visual": "anonymous post being typed, wallet gone, rain ending outside window",
+            },
+        ],
+    },
+    {
+        "slug": "cat-lighthouse-animation",
+        "short_title": "THE CAT AND THE LIGHT",
+        "title": "The Cat Who Kept The Lighthouse Awake",
+        "hook": "An animated cat followed one blinking light and accidentally saved a whole harbor.",
+        "category": "cat animation",
+        "beats": [
+            {
+                "label": "The Hook",
+                "narration": "An animated cat followed one blinking light and accidentally saved a whole harbor.",
+                "onscreen_text": "THE CAT SAW IT",
+                "visual": "cute orange cat on wet stones below a lighthouse, moonlit 2D animation style",
+            },
+            {
+                "label": "The Storm",
+                "narration": "The storm knocked out half the village, and the lighthouse keeper slept through the first warning bell.",
+                "onscreen_text": "THE STORM HIT",
+                "visual": "cartoon storm, sleeping keeper, bell rope swaying, cat ears alert",
+            },
+            {
+                "label": "The Climb",
+                "narration": "The cat chased a moth up the spiral stairs, slipping, scrambling, and refusing to quit.",
+                "onscreen_text": "THE CAT CLIMBED",
+                "visual": "spiral lighthouse stairs, cat chasing glowing moth, playful motion blur",
+            },
+            {
+                "label": "The Lamp",
+                "narration": "At the top, the lamp flickered, and far away a boat drifted toward black rocks.",
+                "onscreen_text": "THE LAMP FLICKERED",
+                "visual": "cat beside giant lamp, tiny boat in storm outside window",
+            },
+            {
+                "label": "The Crash",
+                "narration": "The cat knocked over a toolbox, the keeper woke up, and the whole room exploded into panic.",
+                "onscreen_text": "CHAOS WORKED",
+                "visual": "tools flying, startled keeper, cat wide-eyed, comic impact lines",
+            },
+            {
+                "label": "The Signal",
+                "narration": "The keeper fixed the lamp just before the boat reached the rocks.",
+                "onscreen_text": "THE LIGHT RETURNED",
+                "visual": "bright lighthouse beam cutting through rain toward a boat",
+            },
+            {
+                "label": "The Reward",
+                "narration": "By morning, everyone praised the keeper, while the cat quietly stole a fish from breakfast.",
+                "onscreen_text": "THE CAT GOT PAID",
+                "visual": "sunrise harbor, villagers cheering, cat sneaking fish with smug face",
+            },
+            {
+                "label": "The Sting",
+                "narration": "Nobody knew the truth, except the cat, the moth, and the boat that made it home.",
+                "onscreen_text": "ONLY THE CAT KNEW",
+                "visual": "final cozy shot of cat in lighthouse window, warm sunrise, fish bones",
+            },
+        ],
+    },
+    {
+        "slug": "shadow-town-2d-animation",
+        "short_title": "THE TOWN WITHOUT SHADOWS",
+        "title": "The 2D Town Where Shadows Disappeared",
+        "hook": "In a tiny animated town, people panicked when their shadows disappeared before sunset.",
+        "category": "2d animation moral story",
+        "beats": [
+            {
+                "label": "The Hook",
+                "narration": "In a tiny animated town, people panicked when their shadows disappeared before sunset.",
+                "onscreen_text": "THE SHADOWS LEFT",
+                "visual": "whimsical 2D town square, villagers staring at empty ground, warm sunset colors",
+            },
+            {
+                "label": "The Panic",
+                "narration": "The baker blamed the clockmaker, the clockmaker blamed the mayor, and everyone pointed at someone else.",
+                "onscreen_text": "EVERYONE BLAMED SOMEONE",
+                "visual": "cartoon villagers arguing, pointing fingers, long empty streets",
+            },
+            {
+                "label": "The Kid",
+                "narration": "Only one kid noticed the shadows were not gone; they were hiding under the oldest bridge.",
+                "onscreen_text": "ONE KID NOTICED",
+                "visual": "small child peeking under stone bridge, shy shadow shapes hiding",
+            },
+            {
+                "label": "The Reason",
+                "narration": "The shadows said they were tired of being stepped on by people who never looked down.",
+                "onscreen_text": "THEY WERE TIRED",
+                "visual": "cute shadow characters with sad faces, bridge tunnel, soft blue light",
+            },
+            {
+                "label": "The Deal",
+                "narration": "The kid promised the town would stop rushing and notice the little things again.",
+                "onscreen_text": "A PROMISE FIXED IT",
+                "visual": "kid shaking hands with a shadow, magical glow, villagers listening",
+            },
+            {
+                "label": "The Return",
+                "narration": "One by one, the shadows returned, but they were slightly braver than before.",
+                "onscreen_text": "THE SHADOWS RETURNED",
+                "visual": "shadows stretching across colorful streets, playful 2D motion",
+            },
+            {
+                "label": "The Change",
+                "narration": "After that, people walked slower, greeted each other, and watched where the sun fell.",
+                "onscreen_text": "THE TOWN SLOWED DOWN",
+                "visual": "peaceful town, neighbors waving, golden light and long friendly shadows",
+            },
+            {
+                "label": "The Sting",
+                "narration": "Sometimes a town does not lose magic. Sometimes it stops paying attention.",
+                "onscreen_text": "ATTENTION IS MAGIC",
+                "visual": "final storybook frame, town glowing, child and shadow on bridge",
+            },
+        ],
+    },
 ]
 
 
@@ -318,7 +670,7 @@ def generate_tiktok_story_clip(
     script_path.write_text(_script_text(story), encoding="utf-8")
 
     log(f"Generating original English story voiceover: {story['title']}.")
-    _generate_openai_voiceover(story_narration_text(story), voiceover_path, logger=log)
+    voiceover_meta = _generate_story_voiceover(story_narration_text(story), voiceover_path, logger=log)
     render_story_video(story, voiceover_path, video_path, poster_path, logger=log)
     layout_validation_path = validate_story_video_layout(story, video_path, output_dir, logger=log)
 
@@ -348,6 +700,9 @@ def generate_tiktok_story_clip(
         "layout_validation": str(layout_validation_path),
         "duration_seconds": round(_media_duration(video_path), 2),
         "voiceover": str(voiceover_path),
+        "voiceover_provider": voiceover_meta.get("provider") or "",
+        "voiceover_model": voiceover_meta.get("model") or "",
+        "voiceover_characters": voiceover_meta.get("characters") or 0,
         "video": str(video_path),
         "poster": str(poster_path),
         "created_at": _utc_now(),
@@ -397,11 +752,23 @@ def _build_library_story(source_entry: dict[str, Any], *, sequence_index: int) -
     }
 
 
-def _topic_matches_lane(topic: dict[str, str], lane: str) -> bool:
+def _topic_matches_lane(topic: dict[str, Any], lane: str) -> bool:
     category = str(topic.get("category") or "true history story").lower()
     title = str(topic.get("title") or "").lower()
     haystack = f"{category} {title} {topic.get('slug', '')}".lower()
     lane_lower = lane.lower()
+    if "lawsuit" in lane_lower:
+        return "lawsuit" in haystack
+    if "court" in lane_lower:
+        return "court" in haystack or "legal" in haystack
+    if "reddit" in lane_lower or "storytime" in lane_lower or "forum" in lane_lower:
+        return "reddit" in haystack or "forum" in haystack or "storytime" in haystack
+    if "cat" in lane_lower:
+        return "cat" in haystack
+    if "economy" in lane_lower:
+        return "economy" in haystack or "market" in haystack or "bubble" in haystack
+    if "2d" in lane_lower or "animation" in lane_lower:
+        return "2d" in haystack or "animation" in haystack
     if "survival" in lane_lower:
         return "survival" in haystack or "disaster" in haystack
     if "lost place" in lane_lower:
@@ -457,9 +824,10 @@ def _request_ai_story_payload(source_entry: dict[str, Any], *, sequence_index: i
                 "role": "system",
                 "content": (
                     "You create short, original, monetization-safe English TikTok story scripts. "
-                    "Return strict JSON only. Use well-known public-domain history, documented mysteries, "
-                    "or clearly framed folklore. Avoid copyrighted fiction, explicit gore, current-news claims, "
-                    "unsupported accusations, and invented historical events."
+                    "Return strict JSON only. Use well-known public-domain history, documented mysteries, public legal cases, "
+                    "world economy explainers, original animated fables, original cat animation stories, or original "
+                    "forum-confession style stories. Avoid copyrighted fiction, copied Reddit posts, explicit gore, "
+                    "current-news claims, unsupported accusations, and invented events presented as real."
                 ),
             },
             {"role": "user", "content": prompt},
@@ -478,8 +846,9 @@ def _ai_story_prompt(source_entry: dict[str, Any], *, sequence_index: int, genre
     return (
         f"Create one fresh vertical short story for English TikTok monetization.\n"
         f"Slot: {sequence_index}. Genre lane: {genre}. {source_hint}\n"
-        "Rotate across true history, historical mysteries, eerie folklore, unsolved disappearances, strange events, "
-        "survival stories, ancient mysteries, lost places, and dark biographies.\n"
+        "Rotate across true history, mystery stories, lawsuits, court cases, original forum-confession storytime, "
+        "cat animations, world economy stories, 2D animation fables, eerie folklore, survival stories, ancient mysteries, "
+        "lost places, and dark biographies.\n"
         f"Do not reuse these fallback examples directly: {previous_topics}.\n"
         "Requirements:\n"
         "- 8 beats exactly.\n"
@@ -487,7 +856,9 @@ def _ai_story_prompt(source_entry: dict[str, Any], *, sequence_index: int, genre
         "- Total script should feel like a 60 to 75 second story.\n"
         "- First beat narration must begin with a curiosity hook like: Did you know this actually happened? / Have you ever heard this story? / What if I told you this was real?\n"
         "- Then continue with setup, pressure, turn, consequence, final sting.\n"
-        "- Use a real, widely known historical/folklore subject. Do not invent disasters, causes, dates, or places.\n"
+        "- For history, lawsuits, court cases, and economy stories: use real, widely known public subjects and do not invent causes, dates, rulings, or places.\n"
+        "- For forum/reddit-style stories: make it original fiction and never claim it came from a real Reddit post.\n"
+        "- For cat animation and 2D animation: make it original, visual, cute or emotional, and clearly animated.\n"
         "- If the story is folklore or horror, clearly frame it as legend, rumor, or alleged haunting.\n"
         "- No franchise characters, no graphic gore, no modern crime allegations.\n"
         "- Onscreen text must be 2 to 5 words, bold, emotional, and safe for TikTok.\n"
@@ -705,12 +1076,99 @@ def story_narration_text(story: dict[str, Any]) -> str:
     return " ".join(str(beat.get("narration") or "").strip() for beat in story.get("beats") or []).strip()
 
 
+def _generate_story_voiceover(
+    narration: str,
+    output_path: Path,
+    *,
+    logger: Callable[[str], None],
+) -> dict[str, Any]:
+    provider = os.getenv("TIKTOK_STORY_TTS_PROVIDER", "auto").strip().lower() or "auto"
+    if provider in {"elevenlabs", "11labs"}:
+        return _generate_elevenlabs_voiceover(narration, output_path, logger=logger)
+    if provider in {"openai", "openai_tts"}:
+        return _generate_openai_voiceover(narration, output_path, logger=logger)
+    if provider not in {"auto", "best"}:
+        logger(f"Unknown TTS provider {provider}; using auto fallback.")
+
+    if os.getenv("ELEVENLABS_API_KEY", "").strip() and _elevenlabs_budget_allows(narration, output_path):
+        try:
+            return _generate_elevenlabs_voiceover(narration, output_path, logger=logger)
+        except Exception as exc:
+            logger(f"ElevenLabs TTS failed, falling back to OpenAI TTS: {_safe_tts_error(exc)}")
+    elif os.getenv("ELEVENLABS_API_KEY", "").strip():
+        logger("ElevenLabs TTS skipped by character budget guard; using OpenAI TTS.")
+    return _generate_openai_voiceover(narration, output_path, logger=logger)
+
+
+def _generate_elevenlabs_voiceover(
+    narration: str,
+    output_path: Path,
+    *,
+    logger: Callable[[str], None],
+) -> dict[str, Any]:
+    api_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("ELEVENLABS_API_KEY is required for ElevenLabs voiceover.")
+    if not _elevenlabs_budget_allows(narration, output_path):
+        raise RuntimeError("ElevenLabs monthly character budget guard blocked this story.")
+
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID).strip() or DEFAULT_ELEVENLABS_VOICE_ID
+    model = os.getenv("ELEVENLABS_TTS_MODEL", "eleven_flash_v2_5").strip() or "eleven_flash_v2_5"
+    output_format = os.getenv("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128").strip() or "mp3_44100_128"
+    url = f"{ELEVENLABS_TTS_URL.format(voice_id=voice_id)}?output_format={output_format}"
+    payload = {
+        "text": narration,
+        "model_id": model,
+        "voice_settings": {
+            "stability": _env_float("ELEVENLABS_STABILITY", 0.52, minimum=0.0, maximum=1.0),
+            "similarity_boost": _env_float("ELEVENLABS_SIMILARITY_BOOST", 0.78, minimum=0.0, maximum=1.0),
+            "style": _env_float("ELEVENLABS_STYLE", 0.08, minimum=0.0, maximum=1.0),
+            "use_speaker_boost": os.getenv("ELEVENLABS_USE_SPEAKER_BOOST", "true").strip().lower()
+            not in AI_STORY_DISABLED_VALUES,
+        },
+    }
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "xi-api-key": api_key,
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+        },
+    )
+    try:
+        with urlopen(request, timeout=180) as response:
+            audio = response.read()
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"ElevenLabs TTS error {exc.code}: {_safe_openai_error(body)}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"ElevenLabs TTS network error: {exc.reason}") from exc
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(audio)
+    if not output_path.exists() or output_path.stat().st_size <= 0:
+        raise RuntimeError("ElevenLabs voiceover did not produce an audio file.")
+
+    characters = len(narration)
+    _record_elevenlabs_usage(output_path, characters, model=model)
+    logger(f"ElevenLabs voiceover generated with {model}: {characters} characters.")
+    return {
+        "provider": "elevenlabs",
+        "model": model,
+        "voice_id": voice_id,
+        "characters": characters,
+        "output_format": output_format,
+    }
+
+
 def _generate_openai_voiceover(
     narration: str,
     output_path: Path,
     *,
     logger: Callable[[str], None],
-) -> None:
+) -> dict[str, Any]:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is required for English story voiceover.")
@@ -725,8 +1183,16 @@ def _generate_openai_voiceover(
             raise
         logger(f"OpenAI TTS {model}/{voice} failed, retrying {fallback_model}/{fallback_voice}: {exc}")
         _openai_speech_to_file(fallback_model, fallback_voice, narration, output_path)
+        model = fallback_model
+        voice = fallback_voice
     if not output_path.exists() or output_path.stat().st_size <= 0:
         raise RuntimeError("OpenAI voiceover did not produce an audio file.")
+    return {
+        "provider": "openai",
+        "model": model,
+        "voice": voice,
+        "characters": len(narration),
+    }
 
 
 def _openai_speech_to_file(model: str, voice: str, narration: str, output_path: Path) -> None:
@@ -751,7 +1217,84 @@ def _openai_speech_to_file(model: str, voice: str, narration: str, output_path: 
     output_path.write_bytes(data)
 
 
-def _beats_for_topic(topic: dict[str, str]) -> list[dict[str, str]]:
+def _elevenlabs_budget_allows(narration: str, output_path: Path) -> bool:
+    characters = len(narration)
+    max_story_chars = _env_int("ELEVENLABS_MAX_STORY_CHARS", 1600, minimum=200, maximum=5000)
+    if characters > max_story_chars:
+        return False
+    monthly_limit = _env_int("ELEVENLABS_MONTHLY_CHARACTER_LIMIT", 9000, minimum=0, maximum=10_000_000)
+    if monthly_limit <= 0:
+        return False
+    usage = _read_elevenlabs_usage(output_path)
+    month_key = datetime.now(timezone.utc).strftime("%Y-%m")
+    used = int((usage.get("months") or {}).get(month_key, {}).get("characters") or 0)
+    return used + characters <= monthly_limit
+
+
+def _record_elevenlabs_usage(output_path: Path, characters: int, *, model: str) -> None:
+    usage_path = _elevenlabs_usage_path(output_path)
+    usage = _read_elevenlabs_usage(output_path)
+    month_key = datetime.now(timezone.utc).strftime("%Y-%m")
+    months = usage.setdefault("months", {})
+    month = months.setdefault(month_key, {"characters": 0, "requests": 0})
+    month["characters"] = int(month.get("characters") or 0) + max(0, characters)
+    month["requests"] = int(month.get("requests") or 0) + 1
+    usage["last_used_at"] = _utc_now()
+    usage["last_model"] = model
+    usage_path.parent.mkdir(parents=True, exist_ok=True)
+    usage_path.write_text(json.dumps(usage, indent=2), encoding="utf-8")
+
+
+def _read_elevenlabs_usage(output_path: Path) -> dict[str, Any]:
+    usage_path = _elevenlabs_usage_path(output_path)
+    try:
+        payload = json.loads(usage_path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {"months": {}}
+    except Exception:
+        return {"months": {}}
+
+
+def _elevenlabs_usage_path(output_path: Path) -> Path:
+    configured = os.getenv("ELEVENLABS_USAGE_PATH", "").strip()
+    if configured:
+        return Path(configured)
+    for parent in output_path.resolve().parents:
+        if (parent / ".secrets").exists():
+            return parent / ".secrets" / "elevenlabs_usage.json"
+    return output_path.parent / "elevenlabs_usage.json"
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, "").strip() or default)
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, "").strip() or default)
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _safe_tts_error(exc: Exception) -> str:
+    text = str(exc)
+    text = re.sub(r"sk-[A-Za-z0-9_-]+", "sk-***", text)
+    text = re.sub(r"xi-[A-Za-z0-9_-]+", "xi-***", text)
+    return text[:500]
+
+
+def _beats_for_topic(topic: dict[str, Any]) -> list[dict[str, str]]:
+    custom_beats = topic.get("beats")
+    if isinstance(custom_beats, list) and custom_beats:
+        return [
+            _with_default_visual(topic, beat, index)
+            for index, beat in enumerate(custom_beats, start=1)
+            if isinstance(beat, dict)
+        ]
     figure = topic["figure"]
     beats = [
         {
@@ -798,7 +1341,7 @@ def _beats_for_topic(topic: dict[str, str]) -> list[dict[str, str]]:
     return [_with_default_visual(topic, beat, index) for index, beat in enumerate(beats, start=1)]
 
 
-def _with_default_visual(topic: dict[str, str], beat: dict[str, str], index: int) -> dict[str, str]:
+def _with_default_visual(topic: dict[str, Any], beat: dict[str, str], index: int) -> dict[str, str]:
     enriched = dict(beat)
     figure = topic.get("figure", "the central character")
     place = topic.get("place", "a historical setting")
@@ -819,8 +1362,18 @@ def _with_default_visual(topic: dict[str, str], beat: dict[str, str], index: int
     return enriched
 
 
-def _default_visual_palette(topic: dict[str, str], index: int) -> str:
+def _default_visual_palette(topic: dict[str, Any], index: int) -> str:
     category = str(topic.get("category") or "").lower()
+    if "cat" in category:
+        return "warm amber, moon blue, cozy orange, playful shadows"
+    if "2d" in category or "animation" in category:
+        return "storybook gold, soft blue, candy red, clean ink"
+    if "reddit" in category or "forum" in category or "storytime" in category:
+        return "phone glow blue, bedroom shadow, cafe amber, honest mood"
+    if "lawsuit" in category or "court" in category:
+        return "courtroom brown, paper cream, warning red, deep shadow"
+    if "economy" in category:
+        return "market green, coin gold, paper cream, danger red"
     if "horror" in category or "folklore" in category:
         return "dark forest green, candle amber, black shadows"
     if "mystery" in category or "lost" in category:
@@ -1078,16 +1631,45 @@ def _generate_openai_scene_image(
 
 def _openai_scene_prompt(story: dict[str, Any], beat: dict[str, Any], *, index: int) -> str:
     brand_style = os.getenv("TIKTOK_STORY_IMAGE_STYLE", "").strip()
+    category = str(story.get("category") or "").lower()
+    if "cat" in category:
+        default_style = (
+            "vertical 9:16 charming 2D animated cat story frame, clean bold outlines, expressive cartoon animal acting, "
+            "cinematic lighting, cozy but high-contrast TikTok composition, clear lower-third room for captions"
+        )
+    elif "2d" in category or "animation" in category:
+        default_style = (
+            "vertical 9:16 polished 2D animation storybook frame, clean ink outlines, expressive simple characters, "
+            "bright cinematic colors, emotional readable action, lower-third room for captions"
+        )
+    elif "reddit" in category or "forum" in category or "storytime" in category:
+        default_style = (
+            "vertical 9:16 modern illustrated storytime frame, cinematic 2D comic style, phone glow, everyday rooms, "
+            "expressive original characters, no readable UI text, lower-third room for captions"
+        )
+    elif "court" in category or "lawsuit" in category:
+        default_style = (
+            "vertical 9:16 high-detail courtroom comic illustration, legal documents as abstract props, serious mood, "
+            "clean black ink outlines, cinematic shadows, lower-third room for captions"
+        )
+    elif "economy" in category:
+        default_style = (
+            "vertical 9:16 high-detail comic explainer illustration about markets and money, symbolic charts and coins, "
+            "clean black ink outlines, cinematic color, lower-third room for captions"
+        )
+    else:
+        default_style = (
+            "vertical 9:16 high-detail comic-book historical illustration, thick clean black ink outlines, "
+            "flat cinematic colors, dramatic shadows, expressive non-photorealistic characters, rich background detail, "
+            "TikTok-ready composition with clear subject in the center and room for captions in the lower third"
+        )
     style = brand_style or (
-        "vertical 9:16 high-detail comic-book historical illustration, thick clean black ink outlines, "
-        "flat cinematic colors, dramatic shadows, expressive non-photorealistic characters, rich background detail, "
-        "TikTok-ready composition with clear subject in the center and room for captions in the lower third"
+        default_style
     )
     return (
         f"{style}. "
         "No text, no captions, no logos, no watermarks, no readable documents, no speech bubbles, no UI. "
-        "Avoid gore and graphic violence. Do not create a photorealistic exact likeness of a real person; "
-        "use an original comic-inspired historical character design. "
+        "Avoid gore and graphic violence. Avoid photorealism and use original illustrated character designs. "
         f"Series/story title: {story.get('short_title') or story.get('title')}. "
         f"Category: {story.get('category') or 'historical story'}. "
         f"Beat {index}: {beat.get('label')}. "
@@ -1426,7 +2008,7 @@ def _beat_filters(story: dict[str, Any], beat: dict[str, str], *, index: int, to
             borderw=3,
         ),
     ]
-    filters.extend(_karaoke_caption_filters(beat, duration=duration, index=index))
+    filters.extend(_karaoke_caption_filters(story, beat, duration=duration, index=index))
     return filters
 
 
@@ -1467,6 +2049,18 @@ def _poster_filters(story: dict[str, Any], beat: dict[str, str]) -> list[str]:
 
 def _story_badge(story: dict[str, Any]) -> str:
     category = str(story.get("category") or "").upper()
+    if "LAWSUIT" in category:
+        return "LAWSUIT STORY"
+    if "COURT" in category or "LEGAL" in category:
+        return "COURT CASE"
+    if "REDDIT" in category or "FORUM" in category or "STORYTIME" in category:
+        return "STORYTIME"
+    if "CAT" in category:
+        return "CAT ANIMATION"
+    if "ECONOMY" in category or "MARKET" in category:
+        return "ECONOMY STORY"
+    if "2D" in category or "ANIMATION" in category:
+        return "2D STORY"
     if "FOLKLORE" in category or "HORROR" in category or "LEGEND" in category:
         return "FOLKLORE STORY"
     if "MYSTERY" in category or "VANISH" in category or "LOST" in category:
@@ -1546,7 +2140,7 @@ def _caption_layout_issues(story: dict[str, Any]) -> list[dict[str, Any]]:
     return issues
 
 
-def _karaoke_caption_filters(beat: dict[str, str], *, duration: float, index: int) -> list[str]:
+def _karaoke_caption_filters(story: dict[str, Any], beat: dict[str, str], *, duration: float, index: int) -> list[str]:
     text = str(beat.get("narration") or beat.get("onscreen_text") or beat.get("label") or "")
     groups = _caption_word_groups(text.upper(), max_words=CAPTION_MAX_WORDS)
     flat_words = [word for group in groups for word in group]
@@ -1608,7 +2202,7 @@ def _karaoke_caption_filters(beat: dict[str, str], *, duration: float, index: in
                 )
                 group_window_index += 1
     if index == 1:
-        filters.append(_drawtext_center("REAL STORY", first_caption_y - 78, 32, "white@0.86", max_chars=16, borderw=4))
+        filters.append(_drawtext_center(_story_badge(story), first_caption_y - 78, 32, "white@0.86", max_chars=18, borderw=4))
     return filters
 
 

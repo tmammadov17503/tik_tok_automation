@@ -2520,8 +2520,6 @@ class AutomationController:
     def _maybe_create_autonomous_english_source(self) -> dict[str, Any] | None:
         if not self._autonomous_english_enabled():
             return None
-        if self._english_has_unfinished_queue_items():
-            return None
         if not hasattr(self.sources, "add_source"):
             return None
 
@@ -2559,7 +2557,8 @@ class AutomationController:
 
         self.append_log("Created autonomous English story batch; no pasted link required.")
         self.notify(
-            "Created an autonomous English story batch. I will pick story, history, mystery, and folklore topics myself "
+            "Created an autonomous English story batch. I will rotate themes myself: history, mystery, lawsuits, "
+            "court cases, original forum-style stories, cat animations, world economy, and 2D animation "
             f"and make {planned_clips} monetization videos."
         )
         return created
@@ -2676,6 +2675,13 @@ class AutomationController:
         )
 
         if english_story_mode_enabled(source_entry):
+            remote_pending_count = self.post_queue.remote_pending_count()
+            if remote_pending_count >= self.max_pending_shares:
+                self.append_log(
+                    f"English story generation waiting because TikTok inbox cap is full "
+                    f"({remote_pending_count}/{self.max_pending_shares})."
+                )
+                return
             sequence_index = posted + pending_count + 1
             job = AutomationJobProxy(self, source_entry)
             self.notify("Generating a new English story video for the TikTok inbox.")
