@@ -14,6 +14,13 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from elevenlabs_budget import (
+    BudgetDecision,
+    commit_reservation,
+    release_reservation,
+    reserve_credits,
+)
+
 
 WIDTH = 1080
 HEIGHT = 1920
@@ -1090,13 +1097,11 @@ def _generate_story_voiceover(
     if provider not in {"auto", "best"}:
         logger(f"Unknown TTS provider {provider}; using auto fallback.")
 
-    if os.getenv("ELEVENLABS_API_KEY", "").strip() and _elevenlabs_budget_allows(narration, output_path):
+    if os.getenv("ELEVENLABS_API_KEY", "").strip():
         try:
             return _generate_elevenlabs_voiceover(narration, output_path, logger=logger)
         except Exception as exc:
             logger(f"ElevenLabs TTS failed, falling back to OpenAI TTS: {_safe_tts_error(exc)}")
-    elif os.getenv("ELEVENLABS_API_KEY", "").strip():
-        logger("ElevenLabs TTS skipped by character budget guard; using OpenAI TTS.")
     return _generate_openai_voiceover(narration, output_path, logger=logger)
 
 
@@ -1109,12 +1114,17 @@ def _generate_elevenlabs_voiceover(
     api_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("ELEVENLABS_API_KEY is required for ElevenLabs voiceover.")
-    if not _elevenlabs_budget_allows(narration, output_path):
-        raise RuntimeError("ElevenLabs monthly character budget guard blocked this story.")
 
     voice_id = os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID).strip() or DEFAULT_ELEVENLABS_VOICE_ID
     model = os.getenv("ELEVENLABS_TTS_MODEL", "eleven_flash_v2_5").strip() or "eleven_flash_v2_5"
     output_format = os.getenv("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128").strip() or "mp3_44100_128"
+    reservation = _reserve_elevenlabs_credits(narration, output_path, model=model)
+    if not reservation.allowed:
+        raise RuntimeError(
+            "ElevenLabs weekly budget guard blocked this story "
+            f"({reservation.reason}; estimated {reservation.estimated_credits:.1f} credits)."
+        )
+    ledger_path = _elevenlabs_shared_ledger_path(output_path)
     url = f"{ELEVENLABS_TTS_URL.format(voice_id=voice_id)}?output_format={output_format}"
     payload = {
         "text": narration,
@@ -1140,25 +1150,39 @@ def _generate_elevenlabs_voiceover(
     try:
         with urlopen(request, timeout=180) as response:
             audio = response.read()
+            actual_credits = _optional_float(response.getheader("character-cost", None))
     except HTTPError as exc:
+        release_reservation(ledger_path, reservation.reservation_id)
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"ElevenLabs TTS error {exc.code}: {_safe_openai_error(body)}") from exc
     except URLError as exc:
+        release_reservation(ledger_path, reservation.reservation_id)
         raise RuntimeError(f"ElevenLabs TTS network error: {exc.reason}") from exc
+    except Exception:
+        release_reservation(ledger_path, reservation.reservation_id)
+        raise
+
+    characters = len(narration)
+    committed_credits = actual_credits if actual_credits is not None else reservation.estimated_credits
+    commit_reservation(ledger_path, reservation.reservation_id, actual_credits=committed_credits)
+    if not audio:
+        raise RuntimeError("ElevenLabs voiceover did not return audio data.")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(audio)
     if not output_path.exists() or output_path.stat().st_size <= 0:
         raise RuntimeError("ElevenLabs voiceover did not produce an audio file.")
 
-    characters = len(narration)
-    _record_elevenlabs_usage(output_path, characters, model=model)
-    logger(f"ElevenLabs voiceover generated with {model}: {characters} characters.")
+    logger(
+        f"ElevenLabs voiceover generated with {model}: {characters} characters, "
+        f"{committed_credits:.1f} shared credits."
+    )
     return {
         "provider": "elevenlabs",
         "model": model,
         "voice_id": voice_id,
         "characters": characters,
+        "credits": round(committed_credits, 3),
         "output_format": output_format,
     }
 
@@ -1217,51 +1241,67 @@ def _openai_speech_to_file(model: str, voice: str, narration: str, output_path: 
     output_path.write_bytes(data)
 
 
-def _elevenlabs_budget_allows(narration: str, output_path: Path) -> bool:
+def _reserve_elevenlabs_credits(
+    narration: str,
+    output_path: Path,
+    *,
+    model: str = "eleven_flash_v2_5",
+) -> BudgetDecision:
     characters = len(narration)
     max_story_chars = _env_int("ELEVENLABS_MAX_STORY_CHARS", 1600, minimum=200, maximum=5000)
     if characters > max_story_chars:
-        return False
-    monthly_limit = _env_int("ELEVENLABS_MONTHLY_CHARACTER_LIMIT", 9000, minimum=0, maximum=10_000_000)
-    if monthly_limit <= 0:
-        return False
-    usage = _read_elevenlabs_usage(output_path)
-    month_key = datetime.now(timezone.utc).strftime("%Y-%m")
-    used = int((usage.get("months") or {}).get(month_key, {}).get("characters") or 0)
-    return used + characters <= monthly_limit
+        return BudgetDecision(
+            allowed=False,
+            reason="story_character_limit",
+            reservation_id="",
+            week_start="",
+            estimated_credits=0.0,
+            shared_used_credits=0.0,
+            pipeline_used_credits=0.0,
+            shared_weekly_credit_budget=0.0,
+            pipeline_weekly_credit_budget=0.0,
+        )
+    return reserve_credits(
+        _elevenlabs_shared_ledger_path(output_path),
+        pipeline="tiktok_english",
+        input_characters=characters,
+        model=model,
+        shared_weekly_credit_budget=_env_float(
+            "ELEVENLABS_SHARED_WEEKLY_CREDIT_BUDGET",
+            6000.0,
+            minimum=0.0,
+            maximum=10_000_000.0,
+        ),
+        pipeline_weekly_credit_budget=_env_float(
+            "ELEVENLABS_PIPELINE_WEEKLY_CREDIT_BUDGET",
+            4000.0,
+            minimum=0.0,
+            maximum=10_000_000.0,
+        ),
+        credits_per_character=_env_float(
+            "ELEVENLABS_CREDITS_PER_CHARACTER",
+            1.0,
+            minimum=0.0,
+            maximum=10.0,
+        ),
+    )
 
 
-def _record_elevenlabs_usage(output_path: Path, characters: int, *, model: str) -> None:
-    usage_path = _elevenlabs_usage_path(output_path)
-    usage = _read_elevenlabs_usage(output_path)
-    month_key = datetime.now(timezone.utc).strftime("%Y-%m")
-    months = usage.setdefault("months", {})
-    month = months.setdefault(month_key, {"characters": 0, "requests": 0})
-    month["characters"] = int(month.get("characters") or 0) + max(0, characters)
-    month["requests"] = int(month.get("requests") or 0) + 1
-    usage["last_used_at"] = _utc_now()
-    usage["last_model"] = model
-    usage_path.parent.mkdir(parents=True, exist_ok=True)
-    usage_path.write_text(json.dumps(usage, indent=2), encoding="utf-8")
-
-
-def _read_elevenlabs_usage(output_path: Path) -> dict[str, Any]:
-    usage_path = _elevenlabs_usage_path(output_path)
-    try:
-        payload = json.loads(usage_path.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {"months": {}}
-    except Exception:
-        return {"months": {}}
-
-
-def _elevenlabs_usage_path(output_path: Path) -> Path:
-    configured = os.getenv("ELEVENLABS_USAGE_PATH", "").strip()
+def _elevenlabs_shared_ledger_path(output_path: Path) -> Path:
+    configured = os.getenv("ELEVENLABS_SHARED_LEDGER_PATH", "").strip()
     if configured:
         return Path(configured)
     for parent in output_path.resolve().parents:
         if (parent / ".secrets").exists():
-            return parent / ".secrets" / "elevenlabs_usage.json"
-    return output_path.parent / "elevenlabs_usage.json"
+            return parent / ".secrets" / "elevenlabs_shared_usage.sqlite3"
+    return output_path.parent / "elevenlabs_shared_usage.sqlite3"
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:

@@ -15,6 +15,8 @@ source URL -> yt-dlp -> highlight selection -> ffmpeg vertical clips -> captions
 
 Captions use source subtitles first. If no source subtitles are available, the remote worker can use OpenAI transcription when `OPENAI_API_KEY` is configured.
 
+The separate English worker can also create original story reels. ElevenLabs is the premium narration layer, while OpenAI TTS is the automatic fallback. The English TikTok worker and YouTube agent use one SQLite ledger configured with `ELEVENLABS_SHARED_LEDGER_PATH`. Recommended Starter-plan limits are a 6,000-credit combined weekly budget, with 4,000 credits reserved for TikTok and 2,000 for YouTube. Failed requests release their reservation, so provider errors do not consume the local allowance.
+
 ## Local Run
 
 ```powershell

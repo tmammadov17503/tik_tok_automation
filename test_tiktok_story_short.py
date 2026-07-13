@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import tiktok_story_short as story
 
@@ -70,31 +71,22 @@ class StoryCaptionLayoutTests(unittest.TestCase):
         self.assertEqual(story._story_badge({"category": "cat animation"}), "CAT ANIMATION")
         self.assertEqual(story._story_badge({"category": "world economy story"}), "ECONOMY STORY")
 
-    def test_elevenlabs_budget_guard_limits_monthly_characters(self) -> None:
-        original_limit = os.environ.get("ELEVENLABS_MONTHLY_CHARACTER_LIMIT")
-        original_max_story = os.environ.get("ELEVENLABS_MAX_STORY_CHARS")
-        original_usage = os.environ.get("ELEVENLABS_USAGE_PATH")
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                usage_path = Path(tmp) / "usage.json"
-                os.environ["ELEVENLABS_MONTHLY_CHARACTER_LIMIT"] = "10"
-                os.environ["ELEVENLABS_MAX_STORY_CHARS"] = "200"
-                os.environ["ELEVENLABS_USAGE_PATH"] = str(usage_path)
+    def test_elevenlabs_budget_uses_shared_weekly_credit_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "shared.sqlite3"
+            with patch.dict(
+                os.environ,
+                {
+                    "ELEVENLABS_SHARED_LEDGER_PATH": str(ledger_path),
+                    "ELEVENLABS_SHARED_WEEKLY_CREDIT_BUDGET": "2",
+                    "ELEVENLABS_PIPELINE_WEEKLY_CREDIT_BUDGET": "2",
+                    "ELEVENLABS_CREDITS_PER_CHARACTER": "0.5",
+                },
+                clear=False,
+            ):
+                decision = story._reserve_elevenlabs_credits("12345", Path(tmp) / "voice.mp3")
 
-                self.assertTrue(story._elevenlabs_budget_allows("12345", Path(tmp) / "voice.mp3"))
-                self.assertFalse(story._elevenlabs_budget_allows("12345678901", Path(tmp) / "voice.mp3"))
-        finally:
-            _restore_env("ELEVENLABS_MONTHLY_CHARACTER_LIMIT", original_limit)
-            _restore_env("ELEVENLABS_MAX_STORY_CHARS", original_max_story)
-            _restore_env("ELEVENLABS_USAGE_PATH", original_usage)
-
-
-def _restore_env(name: str, value: str | None) -> None:
-    if value is None:
-        os.environ.pop(name, None)
-    else:
-        os.environ[name] = value
-
-
+            self.assertFalse(decision.allowed)
+            self.assertIn(decision.reason, {"pipeline_weekly_budget", "shared_weekly_budget"})
 if __name__ == "__main__":
     unittest.main()
