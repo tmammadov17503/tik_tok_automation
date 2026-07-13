@@ -19,7 +19,15 @@ class StoryCaptionLayoutTests(unittest.TestCase):
         first_end = slots[0][0] + slots[0][1]
         second_start = slots[1][0]
         self.assertGreaterEqual(second_start - first_end, story.CAPTION_MIN_WORD_GAP)
-        self.assertLessEqual(second_start - first_end, 34)
+        self.assertLessEqual(second_start - first_end, 24)
+
+    def test_caption_prefers_short_onscreen_phrase_over_full_narration(self) -> None:
+        beat = {
+            "narration": "This is a long narration line that should stay in the voiceover and not become a heavy caption filter.",
+            "onscreen_text": "THE CASE BROKE",
+        }
+
+        self.assertEqual(story._caption_text_for_beat(beat), "THE CASE BROKE")
 
     def test_caption_layout_accepts_screenshot_regression_phrase(self) -> None:
         test_story = {

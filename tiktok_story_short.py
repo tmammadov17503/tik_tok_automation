@@ -41,9 +41,9 @@ CAPTION_SAFE_RIGHT = WIDTH - 176
 CAPTION_SAFE_WIDTH = CAPTION_SAFE_RIGHT - CAPTION_SAFE_LEFT
 CAPTION_MAX_WORDS = 3
 CAPTION_MIN_FONT_SIZE = 44
-CAPTION_WORD_GAP_RATIO = 0.34
-CAPTION_MIN_WORD_GAP = 26
-CAPTION_SLOT_RIGHT_PAD = 6
+CAPTION_WORD_GAP_RATIO = 0.24
+CAPTION_MIN_WORD_GAP = 20
+CAPTION_SLOT_RIGHT_PAD = 2
 CAPTION_OUTLINE_WIDTH = 5
 CAPTION_ACTIVE_OUTLINE_WIDTH = 4
 POSTER_SAFE_TEXT_WIDTH = 860
@@ -2086,7 +2086,7 @@ def _caption_layout_issues(story: dict[str, Any]) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     beats = [beat for beat in story.get("beats") or [] if isinstance(beat, dict)]
     for beat_index, beat in enumerate(beats, start=1):
-        text = str(beat.get("narration") or beat.get("onscreen_text") or beat.get("label") or "")
+        text = _caption_text_for_beat(beat)
         groups = _caption_word_groups(text.upper(), max_words=CAPTION_MAX_WORDS)
         for group_index, group in enumerate(groups, start=1):
             draw_group = [_caption_display_word(word) for word in group]
@@ -2141,7 +2141,7 @@ def _caption_layout_issues(story: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _karaoke_caption_filters(story: dict[str, Any], beat: dict[str, str], *, duration: float, index: int) -> list[str]:
-    text = str(beat.get("narration") or beat.get("onscreen_text") or beat.get("label") or "")
+    text = _caption_text_for_beat(beat)
     groups = _caption_word_groups(text.upper(), max_words=CAPTION_MAX_WORDS)
     flat_words = [word for group in groups for word in group]
     timing_windows = _word_timing_windows(flat_words, duration)
@@ -2204,6 +2204,15 @@ def _karaoke_caption_filters(story: dict[str, Any], beat: dict[str, str], *, dur
     if index == 1:
         filters.append(_drawtext_center(_story_badge(story), first_caption_y - 78, 32, "white@0.86", max_chars=18, borderw=4))
     return filters
+
+
+def _caption_text_for_beat(beat: dict[str, str]) -> str:
+    """Prefer the edited punchline phrase; full narration makes FFmpeg filters too heavy."""
+    for key in ("onscreen_text", "label", "narration"):
+        value = _clean(beat.get(key) or "")
+        if value:
+            return value
+    return "STORY"
 
 
 def _beat_durations(beats: list[dict[str, str]], duration: float) -> list[float]:
