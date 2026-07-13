@@ -29,9 +29,11 @@ SCENE_HEIGHT = 960
 FPS = 30
 MIN_STORY_SECONDS = 64.0
 THUMBNAIL_OUTRO_SECONDS = 0.65
-RENDER_VERSION = "tiktok_story_reel_v8_varied_lanes_elevenlabs_balanced_captions"
+RENDER_VERSION = "tiktok_story_reel_v9_forced_alignment_ass_captions"
 OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
+OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
 ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+ELEVENLABS_FORCED_ALIGNMENT_URL = "https://api.elevenlabs.io/v1/forced-alignment"
 DEFAULT_IMAGE_SIZE = "1024x1536"
 DEFAULT_ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
@@ -43,8 +45,8 @@ AMBER = "0xffc857"
 RED = "0xff4d5e"
 WHITE = "white"
 MUTED = "0xd8dde5"
-CAPTION_SAFE_LEFT = 56
-CAPTION_SAFE_RIGHT = WIDTH - 176
+CAPTION_SAFE_LEFT = 150
+CAPTION_SAFE_RIGHT = WIDTH - 150
 CAPTION_SAFE_WIDTH = CAPTION_SAFE_RIGHT - CAPTION_SAFE_LEFT
 CAPTION_MAX_WORDS = 3
 CAPTION_MIN_FONT_SIZE = 44
@@ -53,6 +55,11 @@ CAPTION_MIN_WORD_GAP = 20
 CAPTION_SLOT_RIGHT_PAD = 2
 CAPTION_OUTLINE_WIDTH = 5
 CAPTION_ACTIVE_OUTLINE_WIDTH = 4
+CAPTION_ASS_MARGIN = 120
+CAPTION_ASS_MARGIN_V = 430
+CAPTION_ASS_FONT_SIZE = 68
+CAPTION_ASS_ACTIVE_COLOR = "&H5E4DFF&"
+CAPTION_ASS_BASE_COLOR = "&HFFFFFF&"
 POSTER_SAFE_TEXT_WIDTH = 860
 POSTER_MIN_FONT_SIZE = 54
 
@@ -643,6 +650,21 @@ class StoryClipResult:
     topic: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class AlignedWord:
+    text: str
+    start: float
+    end: float
+
+
+@dataclass(frozen=True)
+class CaptionCue:
+    start: float
+    end: float
+    group_words: tuple[str, ...]
+    active_index: int
+
+
 def english_story_mode_enabled(source_entry: dict[str, Any]) -> bool:
     if os.getenv("TIKTOK_EN_STORY_MODE", "true").strip().lower() in {"0", "false", "no", "off"}:
         return False
@@ -668,6 +690,9 @@ def generate_tiktok_story_clip(
     story_path = output_dir / "story.json"
     script_path = output_dir / "script.txt"
     voiceover_path = output_dir / "voiceover.mp3"
+    alignment_path = output_dir / "voiceover_alignment.json"
+    captions_path = output_dir / "story_captions.ass"
+    captions_manifest_path = output_dir / "caption_manifest.json"
     video_path = output_dir / f"story_{sequence_index:02d}_captioned.mp4"
     poster_path = output_dir / "poster.png"
     metadata_path = output_dir / "metadata.json"
@@ -676,10 +701,40 @@ def generate_tiktok_story_clip(
     story_path.write_text(json.dumps(story, indent=2), encoding="utf-8")
     script_path.write_text(_script_text(story), encoding="utf-8")
 
+    narration = story_narration_text(story)
     log(f"Generating original English story voiceover: {story['title']}.")
-    voiceover_meta = _generate_story_voiceover(story_narration_text(story), voiceover_path, logger=log)
-    render_story_video(story, voiceover_path, video_path, poster_path, logger=log)
-    layout_validation_path = validate_story_video_layout(story, video_path, output_dir, logger=log)
+    voiceover_meta = _generate_story_voiceover(narration, voiceover_path, logger=log)
+    alignment_meta = _generate_story_word_alignment(
+        narration,
+        voiceover_path,
+        alignment_path,
+        logger=log,
+    )
+    aligned_words = _alignment_words_from_payload(alignment_meta)
+    caption_cues = _caption_cues(aligned_words, max_words=CAPTION_MAX_WORDS)
+    _write_story_caption_ass(caption_cues, captions_path)
+    _write_caption_manifest(
+        narration,
+        aligned_words,
+        caption_cues,
+        captions_manifest_path,
+        provider=str(alignment_meta.get("provider") or ""),
+    )
+    render_story_video(
+        story,
+        voiceover_path,
+        video_path,
+        poster_path,
+        captions_path=captions_path,
+        logger=log,
+    )
+    layout_validation_path = validate_story_video_layout(
+        story,
+        video_path,
+        output_dir,
+        captions_manifest_path=captions_manifest_path,
+        logger=log,
+    )
 
     segments = [
         {
@@ -701,7 +756,12 @@ def generate_tiktok_story_clip(
         "topic_slug": story["slug"],
         "story_source": story.get("story_source") or "library",
         "category": story.get("category") or "",
-        "caption_style": "lower_story_karaoke_captions_red_words",
+        "caption_style": "forced_alignment_ass_centered_red_active_word",
+        "caption_alignment": str(alignment_path),
+        "captions": str(captions_path),
+        "caption_manifest": str(captions_manifest_path),
+        "caption_alignment_provider": alignment_meta.get("provider") or "",
+        "caption_word_count": len(aligned_words),
         "poster_style": "thumbnail_safe_final_outro",
         "thumbnail_outro_seconds": THUMBNAIL_OUTRO_SECONDS,
         "layout_validation": str(layout_validation_path),
@@ -991,6 +1051,7 @@ def render_story_video(
     video_path: Path,
     poster_path: Path,
     *,
+    captions_path: Path | None = None,
     logger: Callable[[str], None] | None = None,
 ) -> None:
     ffmpeg = _ffmpeg()
@@ -1031,7 +1092,14 @@ def render_story_video(
     segment_paths.append(outro_path)
     concat_path = output_dir / "concat.txt"
     concat_path.write_text(_concat_file(segment_paths), encoding="utf-8")
-    _merge_segments_with_audio(ffmpeg, concat_path, voiceover_path, video_path, story_duration + thumbnail_outro_seconds)
+    _merge_segments_with_audio(
+        ffmpeg,
+        concat_path,
+        voiceover_path,
+        video_path,
+        story_duration + thumbnail_outro_seconds,
+        captions_path=captions_path,
+    )
 
 
 def validate_story_video_layout(
@@ -1039,12 +1107,15 @@ def validate_story_video_layout(
     video_path: Path,
     output_dir: Path,
     *,
+    captions_manifest_path: Path | None = None,
     logger: Callable[[str], None] | None = None,
 ) -> Path:
     report_path = output_dir / "layout_validation.json"
     log = logger or (lambda message: None)
     disabled = os.getenv("TIKTOK_STORY_VALIDATE_LAYOUT", "true").strip().lower() in AI_STORY_DISABLED_VALUES
     issues = [] if disabled else _caption_layout_issues(story)
+    if not disabled and captions_manifest_path is not None:
+        issues.extend(_caption_manifest_issues(captions_manifest_path))
     frames: list[str] = []
     frame_errors: list[str] = []
     if not disabled:
@@ -1064,6 +1135,7 @@ def validate_story_video_layout(
         "caption_safe_width": CAPTION_SAFE_WIDTH,
         "caption_max_words": CAPTION_MAX_WORDS,
         "caption_min_word_gap": CAPTION_MIN_WORD_GAP,
+        "caption_manifest": str(captions_manifest_path or ""),
         "issues": issues,
         "validation_frames": frames,
         "frame_errors": frame_errors,
@@ -1239,6 +1311,234 @@ def _openai_speech_to_file(model: str, voice: str, narration: str, output_path: 
         return
     data = speech.read() if hasattr(speech, "read") else bytes(speech)
     output_path.write_bytes(data)
+
+
+def _generate_story_word_alignment(
+    narration: str,
+    voiceover_path: Path,
+    alignment_path: Path,
+    *,
+    logger: Callable[[str], None],
+) -> dict[str, Any]:
+    duration = _media_duration(voiceover_path)
+    attempts: list[tuple[str, Callable[[], list[dict[str, Any]]]]] = []
+    elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if elevenlabs_key:
+        attempts.append(
+            (
+                "elevenlabs_forced_alignment",
+                lambda: _elevenlabs_word_alignment(elevenlabs_key, narration, voiceover_path),
+            )
+        )
+    if openai_key:
+        attempts.append(
+            (
+                "openai_whisper_words",
+                lambda: _openai_word_alignment(openai_key, narration, voiceover_path),
+            )
+        )
+    if not attempts:
+        raise RuntimeError("No word-alignment provider is configured; refusing to render an uncaptioned story.")
+
+    expected_count = len(_caption_tokens(narration))
+    errors: list[str] = []
+    for provider, align in attempts:
+        try:
+            raw_words = align()
+            words = _normalized_alignment_words(narration, raw_words, duration=duration)
+            coverage = len(words) / max(1, expected_count)
+            if len(words) != expected_count:
+                raise RuntimeError(
+                    f"alignment covered {len(words)}/{expected_count} narration words"
+                )
+            payload = {
+                "provider": provider,
+                "duration": round(duration, 3),
+                "expected_word_count": expected_count,
+                "aligned_word_count": len(words),
+                "coverage": round(min(1.0, coverage), 4),
+                "words": [
+                    {"text": word.text, "start": round(word.start, 3), "end": round(word.end, 3)}
+                    for word in words
+                ],
+                "created_at": _utc_now(),
+            }
+            alignment_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = alignment_path.with_suffix(alignment_path.suffix + ".tmp")
+            temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            temporary.replace(alignment_path)
+            logger(
+                f"Word alignment ready from {provider}: {len(words)}/{expected_count} narration words."
+            )
+            return payload
+        except Exception as exc:
+            errors.append(f"{provider}: {_safe_tts_error(exc)}")
+            logger(f"Word alignment attempt failed for {provider}: {_safe_tts_error(exc)}")
+    raise RuntimeError(
+        "Word alignment failed; refusing to render or upload a story with missing or mistimed captions. "
+        + "; ".join(errors)
+    )
+
+
+def _elevenlabs_word_alignment(api_key: str, narration: str, audio_path: Path) -> list[dict[str, Any]]:
+    boundary = f"TikTokStoryAlignment{os.urandom(12).hex()}"
+    body = _alignment_multipart_body(
+        boundary,
+        fields={"text": narration},
+        files={"file": (audio_path.name, "audio/mpeg", audio_path.read_bytes())},
+    )
+    request = Request(
+        ELEVENLABS_FORCED_ALIGNMENT_URL,
+        data=body,
+        method="POST",
+        headers={
+            "xi-api-key": api_key,
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+    try:
+        with urlopen(request, timeout=240) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"ElevenLabs alignment error {exc.code}: {_safe_openai_error(detail)}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"ElevenLabs alignment network error: {exc.reason}") from exc
+    payload = _alignment_json(raw, provider="ElevenLabs")
+    words = payload.get("words")
+    if not isinstance(words, list):
+        raise RuntimeError("ElevenLabs alignment did not return word timestamps.")
+    return [word for word in words if isinstance(word, dict)]
+
+
+def _openai_word_alignment(api_key: str, narration: str, audio_path: Path) -> list[dict[str, Any]]:
+    boundary = f"TikTokStoryWhisper{os.urandom(12).hex()}"
+    body = _alignment_multipart_body(
+        boundary,
+        fields={
+            "model": "whisper-1",
+            "response_format": "verbose_json",
+            "timestamp_granularities[]": "word",
+            "language": "en",
+            "prompt": narration[:2200],
+        },
+        files={"file": (audio_path.name, "audio/mpeg", audio_path.read_bytes())},
+    )
+    request = Request(
+        OPENAI_TRANSCRIPTIONS_URL,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+    try:
+        with urlopen(request, timeout=240) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OpenAI word alignment error {exc.code}: {_safe_openai_error(detail)}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"OpenAI word alignment network error: {exc.reason}") from exc
+    payload = _alignment_json(raw, provider="OpenAI")
+    words = payload.get("words")
+    if not isinstance(words, list):
+        raise RuntimeError("OpenAI word alignment did not return word timestamps.")
+    return [word for word in words if isinstance(word, dict)]
+
+
+def _alignment_json(raw: str, *, provider: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw or "{}")
+    except ValueError as exc:
+        raise RuntimeError(f"{provider} alignment returned invalid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{provider} alignment returned an invalid response.")
+    return payload
+
+
+def _alignment_multipart_body(
+    boundary: str,
+    *,
+    fields: dict[str, str],
+    files: dict[str, tuple[str, str, bytes]],
+) -> bytes:
+    parts: list[bytes] = []
+    for name, value in fields.items():
+        parts.extend(
+            [
+                f"--{boundary}".encode("utf-8"),
+                f'Content-Disposition: form-data; name="{name}"'.encode("utf-8"),
+                b"",
+                value.encode("utf-8"),
+            ]
+        )
+    for name, (filename, content_type, data) in files.items():
+        parts.extend(
+            [
+                f"--{boundary}".encode("utf-8"),
+                f'Content-Disposition: form-data; name="{name}"; filename="{filename}"'.encode("utf-8"),
+                f"Content-Type: {content_type}".encode("utf-8"),
+                b"",
+                data,
+            ]
+        )
+    parts.extend([f"--{boundary}--".encode("utf-8"), b""])
+    return b"\r\n".join(parts)
+
+
+def _normalized_alignment_words(
+    narration: str,
+    raw_words: list[dict[str, Any]],
+    *,
+    duration: float,
+) -> list[AlignedWord]:
+    expected = _caption_tokens(narration)
+    usable: list[tuple[str, float, float]] = []
+    for raw_word in raw_words:
+        text = _clean(raw_word.get("text") or raw_word.get("word") or "")
+        start = _optional_float(raw_word.get("start"))
+        end = _optional_float(raw_word.get("end"))
+        if not text or start is None or end is None:
+            continue
+        safe_start = max(0.0, min(float(duration), start))
+        safe_end = max(safe_start + 0.03, min(float(duration), end))
+        usable.append((text, safe_start, safe_end))
+    usable.sort(key=lambda item: (item[1], item[2]))
+    if not usable:
+        raise RuntimeError("Word alignment returned no usable words.")
+
+    preserve_script_words = len(usable) == len(expected)
+    words: list[AlignedWord] = []
+    previous_start = -1.0
+    for index, (aligned_text, start, end) in enumerate(usable):
+        safe_start = max(previous_start, start)
+        safe_end = max(safe_start + 0.03, end)
+        display = expected[index] if preserve_script_words else aligned_text
+        words.append(AlignedWord(text=display, start=safe_start, end=safe_end))
+        previous_start = safe_start
+    return words
+
+
+def _alignment_words_from_payload(payload: dict[str, Any]) -> list[AlignedWord]:
+    words: list[AlignedWord] = []
+    for raw_word in payload.get("words") or []:
+        if not isinstance(raw_word, dict):
+            continue
+        text = _clean(raw_word.get("text") or "")
+        start = _optional_float(raw_word.get("start"))
+        end = _optional_float(raw_word.get("end"))
+        if text and start is not None and end is not None and end > start:
+            words.append(AlignedWord(text=text, start=start, end=end))
+    if not words:
+        raise RuntimeError("Saved word alignment is empty.")
+    return words
+
+
+def _caption_tokens(text: str) -> list[str]:
+    return [word for word in re.split(r"\s+", _clean(text)) if word]
 
 
 def _reserve_elevenlabs_credits(
@@ -1521,7 +1821,23 @@ def _render_thumbnail_outro_segment(ffmpeg: str, poster_path: Path, output_path:
     )
 
 
-def _merge_segments_with_audio(ffmpeg: str, concat_path: Path, voiceover_path: Path, output_path: Path, duration: float) -> None:
+def _merge_segments_with_audio(
+    ffmpeg: str,
+    concat_path: Path,
+    voiceover_path: Path,
+    output_path: Path,
+    duration: float,
+    *,
+    captions_path: Path | None = None,
+) -> None:
+    if captions_path is None or not captions_path.exists():
+        raise RuntimeError("A complete ASS caption track is required before final story rendering.")
+    escaped_captions = _escape_ffmpeg_filter_path(captions_path.resolve())
+    filter_complex = (
+        f"[0:v]ass=filename='{escaped_captions}'[vout];"
+        "[1:a]volume=1.0[a0];[2:a]volume=0.030[a1];"
+        "[a0][a1]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
+    )
     _run(
         [
             ffmpeg,
@@ -1541,13 +1857,19 @@ def _merge_segments_with_audio(ffmpeg: str, concat_path: Path, voiceover_path: P
             "-i",
             "sine=frequency=82:sample_rate=48000",
             "-filter_complex",
-            "[1:a]volume=1.0[a0];[2:a]volume=0.030[a1];[a0][a1]amix=inputs=2:duration=longest:dropout_transition=2[aout]",
+            filter_complex,
             "-map",
-            "0:v",
+            "[vout]",
             "-map",
             "[aout]",
             "-c:v",
-            "copy",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "19",
+            "-pix_fmt",
+            "yuv420p",
             "-c:a",
             "aac",
             "-ar",
@@ -1560,7 +1882,17 @@ def _merge_segments_with_audio(ffmpeg: str, concat_path: Path, voiceover_path: P
             "+faststart",
             str(output_path),
         ],
-        timeout=300,
+        timeout=420,
+    )
+
+
+def _escape_ffmpeg_filter_path(path: Path) -> str:
+    return (
+        str(path)
+        .replace("\\", "/")
+        .replace(":", r"\:")
+        .replace("'", r"\'")
+        .replace(",", r"\,")
     )
 
 
@@ -2048,7 +2380,8 @@ def _beat_filters(story: dict[str, Any], beat: dict[str, str], *, index: int, to
             borderw=3,
         ),
     ]
-    filters.extend(_karaoke_caption_filters(story, beat, duration=duration, index=index))
+    if index == 1:
+        filters.append(_drawtext_center(_story_badge(story), 1140, 30, "white@0.82", max_chars=18, borderw=4))
     return filters
 
 
@@ -2120,6 +2453,175 @@ def _story_brand() -> str:
 
 def _glitch_hook_filters() -> list[str]:
     return []
+
+
+def _caption_cues(words: list[AlignedWord], *, max_words: int) -> list[CaptionCue]:
+    if not words:
+        return []
+    group_size = max(1, max_words)
+    cues: list[CaptionCue] = []
+    previous_end = 0.0
+    for index, word in enumerate(words):
+        group_start = (index // group_size) * group_size
+        group = words[group_start : group_start + group_size]
+        start = max(previous_end, word.start)
+        if index + 1 < len(words):
+            boundary = words[index + 1].start
+        else:
+            boundary = word.end
+        end = max(start + 0.04, boundary)
+        cues.append(
+            CaptionCue(
+                start=round(start, 3),
+                end=round(end, 3),
+                group_words=tuple(item.text for item in group),
+                active_index=index - group_start,
+            )
+        )
+        previous_end = end
+    return cues
+
+
+def _write_story_caption_ass(cues: list[CaptionCue], path: Path) -> None:
+    if not cues:
+        raise RuntimeError("Cannot write an empty subtitle track.")
+    font_name = Path(_font_path().replace("\\:", ":")).stem if _font_path() else "Arial"
+    header = [
+        "[Script Info]",
+        "Title: TikTok Story Word Captions",
+        "ScriptType: v4.00+",
+        f"PlayResX: {WIDTH}",
+        f"PlayResY: {HEIGHT}",
+        "ScaledBorderAndShadow: yes",
+        "WrapStyle: 2",
+        "",
+        "[V4+ Styles]",
+        "; Alignment=2",
+        f"; MarginL={CAPTION_ASS_MARGIN}",
+        f"; MarginR={CAPTION_ASS_MARGIN}",
+        (
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+            "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+            "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding"
+        ),
+        (
+            f"Style: StoryCaption,{font_name},{CAPTION_ASS_FONT_SIZE},&H00FFFFFF,&H00FF4D5E,"
+            "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,5,0,2,"
+            f"{CAPTION_ASS_MARGIN},{CAPTION_ASS_MARGIN},{CAPTION_ASS_MARGIN_V},1"
+        ),
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    events = [
+        (
+            f"Dialogue: 0,{_ass_time(cue.start)},{_ass_time(cue.end)},StoryCaption,,0,0,0,,"
+            f"{_caption_ass_text(cue)}"
+        )
+        for cue in cues
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text("\n".join(header + events) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _caption_ass_text(cue: CaptionCue) -> str:
+    words = [_caption_display_word(word) for word in cue.group_words]
+    lines = _caption_group_lines(words, size=CAPTION_ASS_FONT_SIZE)
+    fitted_size = _caption_fitted_font_size(lines, CAPTION_ASS_FONT_SIZE)
+    lines = _caption_group_lines(words, size=fitted_size)
+    output: list[str] = [f"{{\\fs{fitted_size}\\bord5\\shad0}}"]
+    cursor = 0
+    for line_index, line in enumerate(lines):
+        if line_index:
+            output.append(r"\N")
+        for word_index, word in enumerate(line):
+            if word_index:
+                output.append(" ")
+            color = CAPTION_ASS_ACTIVE_COLOR if cursor == cue.active_index else CAPTION_ASS_BASE_COLOR
+            output.append(f"{{\\c{color}}}{_escape_ass_text(word)}")
+            cursor += 1
+    return "".join(output)
+
+
+def _ass_time(seconds: float) -> str:
+    centiseconds = max(0, int(round(seconds * 100)))
+    hours, remainder = divmod(centiseconds, 360000)
+    minutes, remainder = divmod(remainder, 6000)
+    whole_seconds, fraction = divmod(remainder, 100)
+    return f"{hours}:{minutes:02d}:{whole_seconds:02d}.{fraction:02d}"
+
+
+def _escape_ass_text(text: str) -> str:
+    return text.replace("\\", "").replace("{", "(").replace("}", ")").replace("\n", " ").strip()
+
+
+def _write_caption_manifest(
+    narration: str,
+    words: list[AlignedWord],
+    cues: list[CaptionCue],
+    path: Path,
+    *,
+    provider: str,
+) -> None:
+    payload = {
+        "provider": provider,
+        "expected_word_count": len(_caption_tokens(narration)),
+        "aligned_word_count": len(words),
+        "cue_count": len(cues),
+        "all_words_present": len(words) == len(_caption_tokens(narration)),
+        "non_overlapping": all(left.end <= right.start for left, right in zip(cues, cues[1:])),
+        "centered": True,
+        "max_words_per_group": CAPTION_MAX_WORDS,
+        "words": [word.text for word in words],
+        "cues": [
+            {
+                "start": cue.start,
+                "end": cue.end,
+                "group_words": list(cue.group_words),
+                "active_index": cue.active_index,
+            }
+            for cue in cues
+        ],
+        "created_at": _utc_now(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _caption_manifest_issues(path: Path) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [{"type": "caption_manifest_missing", "error": str(exc)[:300]}]
+    issues: list[dict[str, Any]] = []
+    expected = int(payload.get("expected_word_count") or 0)
+    aligned = int(payload.get("aligned_word_count") or 0)
+    cue_count = int(payload.get("cue_count") or 0)
+    if expected <= 0 or aligned != expected:
+        issues.append(
+            {
+                "type": "caption_word_coverage",
+                "expected_word_count": expected,
+                "aligned_word_count": aligned,
+            }
+        )
+    if cue_count != aligned:
+        issues.append(
+            {
+                "type": "caption_cue_coverage",
+                "cue_count": cue_count,
+                "aligned_word_count": aligned,
+            }
+        )
+    if not payload.get("non_overlapping"):
+        issues.append({"type": "caption_cue_overlap"})
+    if not payload.get("centered"):
+        issues.append({"type": "caption_not_centered"})
+    return issues
 
 
 def _caption_layout_issues(story: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2247,8 +2749,8 @@ def _karaoke_caption_filters(story: dict[str, Any], beat: dict[str, str], *, dur
 
 
 def _caption_text_for_beat(beat: dict[str, str]) -> str:
-    """Prefer the edited punchline phrase; full narration makes FFmpeg filters too heavy."""
-    for key in ("onscreen_text", "label", "narration"):
+    """Use the spoken narration so captions never omit words from the voiceover."""
+    for key in ("narration", "onscreen_text", "label"):
         value = _clean(beat.get(key) or "")
         if value:
             return value
@@ -2335,7 +2837,7 @@ def _caption_fitted_font_size(lines: list[list[str]], preferred_size: int) -> in
 
 
 def _caption_display_word(word: str) -> str:
-    return _one_line(_clean(word).replace("'", chr(8217)), 18)
+    return _clean(word).replace("'", chr(8217)).replace("\n", " ").strip()
 
 
 def _safe_caption_x(line_width: int) -> int:
