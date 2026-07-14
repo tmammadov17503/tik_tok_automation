@@ -8,6 +8,110 @@ import tiktok_story_short as story
 
 
 class StoryCaptionLayoutTests(unittest.TestCase):
+    def test_beat_render_retries_atomically_with_ultrafast_preset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            background = root / "scene.png"
+            output = root / "beat_02.mp4"
+            background.write_bytes(b"image")
+            commands: list[list[str]] = []
+
+            def run(command: list[str], *, timeout: int):
+                commands.append(command)
+                self.assertNotEqual(Path(command[-1]), output)
+                if len(commands) == 1:
+                    raise RuntimeError(f"Command timed out after {timeout} seconds")
+                Path(command[-1]).write_bytes(b"valid-video")
+
+            with (
+                patch.object(story, "_run", side_effect=run),
+                patch.object(
+                    story,
+                    "_valid_video_file",
+                    side_effect=lambda path, **_kwargs: path.exists() and path.stat().st_size > 0,
+                ),
+            ):
+                story._render_beat_segment(
+                    "ffmpeg",
+                    {"short_title": "A TEST"},
+                    {"narration": "The test narration."},
+                    2,
+                    8,
+                    8.0,
+                    output,
+                    background,
+                )
+            rendered_bytes = output.read_bytes()
+
+        self.assertEqual(len(commands), 2)
+        self.assertIn("veryfast", commands[0])
+        self.assertIn("ultrafast", commands[1])
+        self.assertEqual(rendered_bytes, b"valid-video")
+
+    def test_completed_beat_is_reused_without_running_ffmpeg(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "beat_01.mp4"
+            output.write_bytes(b"already-valid")
+            messages: list[str] = []
+            with (
+                patch.object(story, "_valid_video_file", return_value=True),
+                patch.object(story, "_render_beat_segment") as render,
+            ):
+                story._render_or_reuse_story_beat(
+                    "ffmpeg",
+                    {"short_title": "A TEST"},
+                    {"narration": "The test narration."},
+                    index=1,
+                    total=8,
+                    duration=8.0,
+                    output_path=output,
+                    background_path=root / "scene.png",
+                    logger=messages.append,
+                )
+
+        render.assert_not_called()
+        self.assertTrue(any("Reusing completed story beat 1/8" in message for message in messages))
+
+    def test_final_merge_retries_atomically_instead_of_leaving_partial_mp4(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            captions = root / "story_captions.ass"
+            output = root / "final.mp4"
+            captions.write_text("[Script Info]\n", encoding="utf-8")
+            commands: list[list[str]] = []
+
+            def run(command: list[str], *, timeout: int):
+                commands.append(command)
+                self.assertNotEqual(Path(command[-1]), output)
+                if len(commands) == 1:
+                    Path(command[-1]).write_bytes(b"partial")
+                    raise RuntimeError(f"Command timed out after {timeout} seconds")
+                Path(command[-1]).write_bytes(b"complete")
+
+            with (
+                patch.object(story, "_run", side_effect=run),
+                patch.object(
+                    story,
+                    "_valid_video_file",
+                    side_effect=lambda path, **_kwargs: path.exists() and path.read_bytes() == b"complete",
+                ),
+            ):
+                story._merge_segments_with_audio(
+                    "ffmpeg",
+                    root / "concat.txt",
+                    root / "voiceover.mp3",
+                    output,
+                    65.0,
+                    captions_path=captions,
+                )
+            rendered_bytes = output.read_bytes()
+
+        self.assertEqual(len(commands), 2)
+        self.assertIn("veryfast", commands[0])
+        self.assertIn("ultrafast", commands[1])
+        self.assertEqual(rendered_bytes, b"complete")
+
     def test_caption_groups_allow_three_words_when_they_fit(self) -> None:
         groups = story._caption_word_groups("LIGHT WAS THERE.", max_words=story.CAPTION_MAX_WORDS)
 
@@ -79,7 +183,14 @@ class StoryCaptionLayoutTests(unittest.TestCase):
             root = Path(tmp)
             captions = root / "story_captions.ass"
             captions.write_text("[Script Info]\n", encoding="utf-8")
-            with patch.object(story, "_run") as run:
+            with (
+                patch.object(
+                    story,
+                    "_run",
+                    side_effect=lambda command, **_kwargs: Path(command[-1]).write_bytes(b"video"),
+                ) as run,
+                patch.object(story, "_valid_video_file", return_value=True),
+            ):
                 story._merge_segments_with_audio(
                     "ffmpeg",
                     root / "concat.txt",

@@ -29,7 +29,7 @@ SCENE_HEIGHT = 960
 FPS = 30
 MIN_STORY_SECONDS = 64.0
 THUMBNAIL_OUTRO_SECONDS = 0.65
-RENDER_VERSION = "tiktok_story_reel_v9_forced_alignment_ass_captions"
+RENDER_VERSION = "tiktok_story_reel_v10_forced_alignment_atomic_retry"
 OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
 OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
 ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
@@ -1082,8 +1082,17 @@ def render_story_video(
         background_path = scene_paths.get(index) or (segments_dir / f"background_{index:02d}.ppm")
         if not background_path.exists():
             _write_scene_background(story, beat, index, len(beats), background_path)
-        log(f"Rendering story beat {index}/{len(beats)}.")
-        _render_beat_segment(ffmpeg, story, beat, index, len(beats), duration, segment_path, background_path)
+        _render_or_reuse_story_beat(
+            ffmpeg,
+            story,
+            beat,
+            index=index,
+            total=len(beats),
+            duration=duration,
+            output_path=segment_path,
+            background_path=background_path,
+            logger=log,
+        )
         segment_paths.append(segment_path)
 
     outro_path = segments_dir / "beat_99_thumbnail_outro.mp4"
@@ -1734,8 +1743,9 @@ def _render_beat_segment(
     background_path: Path,
 ) -> None:
     filters = ",".join(_beat_filters(story, beat, index=index, total=total, duration=duration))
-    _run(
-        [
+    safe_duration = max(0.5, duration)
+    _render_video_atomically(
+        lambda preset, target: [
             ffmpeg,
             "-y",
             "-loop",
@@ -1747,18 +1757,61 @@ def _render_beat_segment(
             "-vf",
             filters,
             "-t",
-            f"{max(0.5, duration):.3f}",
+            f"{safe_duration:.3f}",
             "-pix_fmt",
             "yuv420p",
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            preset,
             "-crf",
             "19",
-            str(output_path),
+            "-movflags",
+            "+faststart",
+            str(target),
         ],
-        timeout=180,
+        output_path,
+        expected_duration=safe_duration,
+        primary_timeout=_env_int(
+            "TIKTOK_STORY_BEAT_RENDER_TIMEOUT_SECONDS",
+            420,
+            minimum=120,
+            maximum=1800,
+        ),
+        retry_timeout=_env_int(
+            "TIKTOK_STORY_BEAT_RETRY_TIMEOUT_SECONDS",
+            420,
+            minimum=120,
+            maximum=1800,
+        ),
+    )
+
+
+def _render_or_reuse_story_beat(
+    ffmpeg: str,
+    story: dict[str, Any],
+    beat: dict[str, str],
+    *,
+    index: int,
+    total: int,
+    duration: float,
+    output_path: Path,
+    background_path: Path,
+    logger: Callable[[str], None],
+) -> None:
+    if _valid_video_file(output_path, min_duration=max(0.2, duration * 0.92)):
+        logger(f"Reusing completed story beat {index}/{total}.")
+        return
+    logger(f"Rendering story beat {index}/{total}.")
+    _render_beat_segment(
+        ffmpeg,
+        story,
+        beat,
+        index,
+        total,
+        duration,
+        output_path,
+        background_path,
     )
 
 
@@ -1838,8 +1891,8 @@ def _merge_segments_with_audio(
         "[1:a]volume=1.0[a0];[2:a]volume=0.030[a1];"
         "[a0][a1]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
     )
-    _run(
-        [
+    _render_video_atomically(
+        lambda preset, target: [
             ffmpeg,
             "-y",
             "-f",
@@ -1865,7 +1918,7 @@ def _merge_segments_with_audio(
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            preset,
             "-crf",
             "19",
             "-pix_fmt",
@@ -1880,9 +1933,53 @@ def _merge_segments_with_audio(
             f"{duration:.3f}",
             "-movflags",
             "+faststart",
-            str(output_path),
+            str(target),
         ],
-        timeout=420,
+        output_path,
+        expected_duration=duration,
+        primary_timeout=_env_int(
+            "TIKTOK_STORY_FINAL_RENDER_TIMEOUT_SECONDS",
+            900,
+            minimum=300,
+            maximum=3600,
+        ),
+        retry_timeout=_env_int(
+            "TIKTOK_STORY_FINAL_RETRY_TIMEOUT_SECONDS",
+            600,
+            minimum=300,
+            maximum=3600,
+        ),
+    )
+
+
+def _render_video_atomically(
+    command_builder: Callable[[str, Path], list[str]],
+    output_path: Path,
+    *,
+    expected_duration: float,
+    primary_timeout: int,
+    retry_timeout: int,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_name(f".{output_path.stem}.rendering{output_path.suffix or '.mp4'}")
+    attempts = (("veryfast", primary_timeout), ("ultrafast", retry_timeout))
+    errors: list[str] = []
+    for preset, timeout in attempts:
+        temporary.unlink(missing_ok=True)
+        try:
+            _run(command_builder(preset, temporary), timeout=timeout)
+            if not _valid_video_file(
+                temporary,
+                min_duration=max(0.1, expected_duration * 0.92),
+            ):
+                raise RuntimeError("FFmpeg produced an incomplete or unreadable MP4.")
+            temporary.replace(output_path)
+            return
+        except Exception as exc:
+            errors.append(f"{preset}: {_render_error_summary(exc)}")
+            temporary.unlink(missing_ok=True)
+    raise RuntimeError(
+        f"{output_path.name} render failed after {len(attempts)} attempts: " + "; ".join(errors)
     )
 
 
@@ -3071,6 +3168,32 @@ def _media_duration(path: Path) -> float:
         return MIN_STORY_SECONDS
 
 
+def _valid_video_file(path: Path, *, min_duration: float) -> bool:
+    if not path.exists() or path.stat().st_size < 1024:
+        return False
+    ffprobe = _ffprobe()
+    if not ffprobe:
+        return True
+    try:
+        completed = _run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            timeout=30,
+        )
+        duration = float((completed.stdout or "").strip())
+    except (OSError, TypeError, ValueError, RuntimeError):
+        return False
+    return duration >= max(0.1, min_duration)
+
+
 def _extract_validation_frames(ffmpeg: str, video_path: Path, output_dir: Path) -> list[Path]:
     frame_dir = output_dir / "validation_frames"
     frame_dir.mkdir(parents=True, exist_ok=True)
@@ -3113,10 +3236,19 @@ def _concat_file(paths: list[Path]) -> str:
 def _run(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(command, check=True, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        executable = Path(command[0]).name if command else "command"
+        target = Path(command[-1]).name if command else "output"
+        raise RuntimeError(f"{executable} timed out after {timeout} seconds while rendering {target}.") from exc
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip()
         tail = "\n".join(detail.splitlines()[-8:])
         raise RuntimeError(tail or str(exc)) from exc
+
+
+def _render_error_summary(exc: Exception) -> str:
+    text = re.sub(r"\s+", " ", str(exc)).strip()
+    return text[:320] or exc.__class__.__name__
 
 
 def _script_text(story: dict[str, Any]) -> str:
