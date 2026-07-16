@@ -277,6 +277,22 @@ class StoryCaptionLayoutTests(unittest.TestCase):
         self.assertTrue(any("economy" in category for category in categories))
         self.assertTrue(any("2d" in category or "animation" in category for category in categories))
 
+    def test_story_batch_rotation_offset_continues_across_batches(self) -> None:
+        first_batch = {
+            "source_url": "story://autonomous-english-reels/20260716T120000Z-r00",
+        }
+        second_batch = {
+            "source_url": "story://autonomous-english-reels/20260717T200000Z-r08",
+        }
+
+        first_story = story.build_story(first_batch, sequence_index=1)
+        continued_story = story.build_story(second_batch, sequence_index=1)
+        expected_story = story._build_library_story(second_batch, sequence_index=9)
+
+        self.assertNotEqual(first_story["category"], continued_story["category"])
+        self.assertEqual(continued_story["category"], expected_story["category"])
+        self.assertEqual(story.story_rotation_size(), len(story.GENRE_ROTATION))
+
     def test_story_badges_match_new_niches(self) -> None:
         self.assertEqual(story._story_badge({"category": "lawsuit story"}), "LAWSUIT STORY")
         self.assertEqual(story._story_badge({"category": "cat animation"}), "CAT ANIMATION")

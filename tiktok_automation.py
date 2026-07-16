@@ -14,7 +14,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from tiktok_story_short import english_story_mode_enabled, generate_tiktok_story_clip
+from tiktok_story_short import english_story_mode_enabled, generate_tiktok_story_clip, story_rotation_size
 
 
 UPLOAD_INIT_URL = "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/"
@@ -162,6 +162,27 @@ def hashtags_for_audience_language(value: Any, *, account_profile: Any = None) -
     if language == "en":
         return list(ENGLISH_TIKTOK_HASHTAGS)
     return list(CANONICAL_TIKTOK_HASHTAGS)
+
+
+def english_story_hashtags(category: Any) -> list[str]:
+    key = str(category or "").strip().casefold()
+    if "lawsuit" in key:
+        return ["#storytime", "#lawtok", "#lawsuit", "#didyouknow", "#learnontiktok"]
+    if "court" in key or "legal" in key:
+        return ["#storytime", "#lawtok", "#courtcase", "#didyouknow", "#learnontiktok"]
+    if "reddit" in key or "forum" in key or "confession" in key:
+        return ["#storytime", "#redditstories", "#confession", "#storytelling", "#didyouknow"]
+    if "cat" in key:
+        return ["#catsoftiktok", "#animation", "#storytime", "#cattok", "#didyouknow"]
+    if "economy" in key or "market" in key or "money" in key:
+        return ["#economics", "#moneyhistory", "#storytime", "#didyouknow", "#learnontiktok"]
+    if "2d" in key or "animation" in key:
+        return ["#animation", "#2danimation", "#animatedstory", "#storytime", "#didyouknow"]
+    if "mystery" in key or "survival" in key or "lost" in key or "horror" in key:
+        return ["#mysterytok", "#unsolved", "#storytime", "#didyouknow", "#learnontiktok"]
+    if "history" in key or "biography" in key or "ancient" in key:
+        return ["#historytok", "#worldhistory", "#storytime", "#didyouknow", "#learnontiktok"]
+    return list(ENGLISH_TIKTOK_HASHTAGS)
 
 
 def compact_number(value: int | float) -> str:
@@ -492,8 +513,15 @@ class PostQueueManager:
                     source_entry.get("audience_language"),
                     account_profile=account_profile,
                 )
+                story_category = str(segment.get("story_category") or "").strip()
+                story_hashtags = (
+                    english_story_hashtags(story_category)
+                    if audience_language == "en" and story_category
+                    else None
+                )
                 hashtags = normalize_tiktok_hashtags(
-                    source_entry.get("hashtags")
+                    story_hashtags
+                    or source_entry.get("hashtags")
                     or hashtags_for_audience_language(audience_language, account_profile=account_profile)
                 )
                 items.append(
@@ -512,6 +540,7 @@ class PostQueueManager:
                             "segment_start": segment.get("start_seconds"),
                             "segment_end": segment.get("end_seconds"),
                             "segment_excerpt": segment.get("excerpt") or "",
+                            "story_category": story_category,
                             "status": "pending",
                             "hashtags": hashtags,
                             "created_at": now,
@@ -630,6 +659,7 @@ class PostQueueManager:
             "segment_start": safe_float(item.get("segment_start"), 0.0),
             "segment_end": safe_float(item.get("segment_end"), 0.0),
             "segment_excerpt": str(item.get("segment_excerpt") or ""),
+            "story_category": str(item.get("story_category") or ""),
             "status": str(item.get("status") or "pending"),
             "publish_id": str(item.get("publish_id") or ""),
             "tiktok_status": str(item.get("tiktok_status") or ""),
@@ -732,6 +762,7 @@ class PerformanceMetricsStore:
                 "segment_start": clip.get("segment_start"),
                 "segment_end": clip.get("segment_end"),
                 "segment_excerpt": clip.get("segment_excerpt") or "",
+                "story_category": clip.get("story_category") or "",
             }
         )
         with self._lock:
@@ -814,6 +845,7 @@ class PerformanceMetricsStore:
                     "segment_start": clip.get("segment_start"),
                     "segment_end": clip.get("segment_end"),
                     "segment_excerpt": clip.get("segment_excerpt") or "",
+                    "story_category": clip.get("story_category") or "",
                 }
             )
             items.append(metric)
@@ -1196,6 +1228,7 @@ class PerformanceMetricsStore:
             "segment_start": safe_float(metric.get("segment_start"), 0.0),
             "segment_end": safe_float(metric.get("segment_end"), 0.0),
             "segment_excerpt": str(metric.get("segment_excerpt") or ""),
+            "story_category": str(metric.get("story_category") or ""),
         }
 
     def _read(self) -> dict[str, Any]:
@@ -1437,10 +1470,10 @@ class AutomationController:
             item.get("audience_language"),
             account_profile=account_profile,
         )
-        hashtag_source = (
+        hashtag_source = item.get("hashtags") or (
             hashtags_for_audience_language(audience_language, account_profile=account_profile)
             if audience_language == "en"
-            else item.get("hashtags") or self.post_queue.default_hashtags
+            else self.post_queue.default_hashtags
         )
         hashtags = normalize_tiktok_hashtags(hashtag_source)
         hook = (
@@ -1463,6 +1496,7 @@ class AutomationController:
             item.get("audience_language"),
             account_profile=item.get("account_profile"),
         ) == "en":
+            category_key = str(item.get("story_category") or "").casefold()
             hooks = [
                 "This story starts normal, then gets seriously strange \U0001F440",
                 "The ending makes the whole thing feel unreal \U0001F633",
@@ -1470,7 +1504,37 @@ class AutomationController:
                 "This sounds fake until you hear what happened next \U0001F633",
                 "The last part is the reason this story still spreads \U0001F440",
             ]
-            if any(token in excerpt_key for token in ("oil", "land", "power", "country")):
+            if "lawsuit" in category_key:
+                hooks = [
+                    "The headline left out the most important part of this lawsuit \U0001F440",
+                    "The real case is much darker than the joke people remember \U0001F633",
+                ]
+            elif "court" in category_key or "legal" in category_key:
+                hooks = [
+                    "One court case changed what millions of people hear today \U0001F440",
+                    "This ruling quietly changed everyday life \U0001F633",
+                ]
+            elif "cat" in category_key:
+                hooks = [
+                    "This tiny cat made one choice that changed the whole town \U0001F440",
+                    "The smallest hero in this story noticed what everyone missed \U0001F633",
+                ]
+            elif "economy" in category_key or "market" in category_key:
+                hooks = [
+                    "People thought the price could only go up. Then everything broke \U0001F440",
+                    "This is what happens when excitement becomes an economy \U0001F633",
+                ]
+            elif "2d" in category_key or "animation" in category_key:
+                hooks = [
+                    "This animated town learned the lesson one second too late \U0001F440",
+                    "The simple rule in this story changes everything \U0001F633",
+                ]
+            elif "reddit" in category_key or "forum" in category_key:
+                hooks = [
+                    "One small decision turned this confession into a nightmare \U0001F440",
+                    "The update is where this story becomes impossible to ignore \U0001F633",
+                ]
+            elif any(token in excerpt_key for token in ("oil", "land", "power", "country")):
                 hooks = [
                     "The fight was never just politics. It was power \U0001F440",
                     "The resource behind this story explains the betrayal \U0001F633",
@@ -2525,7 +2589,13 @@ class AutomationController:
 
         planned_clips = int(MODE_PROFILES[CONTENT_MODE_MONETIZATION]["default_planned_clips"])
         batch_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        batch_url = f"{AUTONOMOUS_ENGLISH_SOURCE_URL}/{batch_stamp}"
+        prior_story_count = sum(
+            1
+            for item in self.post_queue.list_items()
+            if str(item.get("source_url") or "").startswith(AUTONOMOUS_ENGLISH_SOURCE_URL)
+        )
+        rotation_offset = prior_story_count % max(1, story_rotation_size())
+        batch_url = f"{AUTONOMOUS_ENGLISH_SOURCE_URL}/{batch_stamp}-r{rotation_offset:02d}"
         batch_title = f"{AUTONOMOUS_ENGLISH_SOURCE_TITLE} {batch_stamp}"
         try:
             self.sources.add_source(

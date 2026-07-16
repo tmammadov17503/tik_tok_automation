@@ -83,6 +83,7 @@ GENRE_ROTATION = [
     "unbelievable true story",
     "historical mystery",
 ]
+STORY_ROTATION_SUFFIX = re.compile(r"-r(?P<offset>\d+)$", re.IGNORECASE)
 HOOK_OPENERS = [
     "Did you know this actually happened?",
     "Have you ever heard this story?",
@@ -741,6 +742,7 @@ def generate_tiktok_story_clip(
             "start_seconds": 0.0,
             "end_seconds": round(_media_duration(video_path), 2),
             "excerpt": story["hook"],
+            "story_category": story.get("category") or "",
             "reason": "Original English story reel generated for the autonomous story account.",
         }
     ]
@@ -793,10 +795,25 @@ def build_story(
     logger: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     log = logger or (lambda message: None)
-    ai_story = _build_ai_story(source_entry, sequence_index=sequence_index, logger=log)
+    rotation_index = _story_rotation_index(source_entry, sequence_index=sequence_index)
+    ai_story = _build_ai_story(source_entry, sequence_index=rotation_index, logger=log)
     if ai_story is not None:
-        return _with_opening_hook(ai_story, sequence_index=sequence_index)
-    return _with_opening_hook(_build_library_story(source_entry, sequence_index=sequence_index), sequence_index=sequence_index)
+        return _with_opening_hook(ai_story, sequence_index=rotation_index)
+    return _with_opening_hook(
+        _build_library_story(source_entry, sequence_index=rotation_index),
+        sequence_index=rotation_index,
+    )
+
+
+def story_rotation_size() -> int:
+    return len(GENRE_ROTATION)
+
+
+def _story_rotation_index(source_entry: dict[str, Any], *, sequence_index: int) -> int:
+    source_url = str(source_entry.get("source_url") or "").strip()
+    match = STORY_ROTATION_SUFFIX.search(source_url)
+    offset = int(match.group("offset")) if match else 0
+    return max(1, sequence_index) + offset
 
 
 def _build_library_story(source_entry: dict[str, Any], *, sequence_index: int) -> dict[str, Any]:
