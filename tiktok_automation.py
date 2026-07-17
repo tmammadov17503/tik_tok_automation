@@ -14,7 +14,12 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from tiktok_story_short import english_story_mode_enabled, generate_tiktok_story_clip, story_rotation_size
+from tiktok_story_short import (
+    english_story_mode_enabled,
+    generate_tiktok_story_clip,
+    story_identity_keys,
+    story_rotation_size,
+)
 
 
 UPLOAD_INIT_URL = "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/"
@@ -183,6 +188,33 @@ def english_story_hashtags(category: Any) -> list[str]:
     if "history" in key or "biography" in key or "ancient" in key:
         return ["#historytok", "#worldhistory", "#storytime", "#didyouknow", "#learnontiktok"]
     return list(ENGLISH_TIKTOK_HASHTAGS)
+
+
+def story_item_identity_keys(item: dict[str, Any]) -> set[str]:
+    return story_identity_keys(
+        {
+            "slug": item.get("story_slug") or "",
+            "title": item.get("story_title") or "",
+            "hook": item.get("segment_excerpt") or "",
+        }
+    )
+
+
+def clip_display_name(item: dict[str, Any]) -> str:
+    story_title = repair_mojibake(str(item.get("story_title") or "")).strip()
+    if story_title:
+        return story_title
+    is_story = bool(str(item.get("story_category") or "").strip()) or str(item.get("source_url") or "").startswith(
+        AUTONOMOUS_ENGLISH_SOURCE_URL
+    )
+    if is_story:
+        excerpt = repair_mojibake(str(item.get("segment_excerpt") or "")).strip()
+        if excerpt:
+            first_sentence = re.split(r"(?<=[.!?])\s+", excerpt, maxsplit=1)[0].strip()
+            if len(first_sentence) > 72:
+                first_sentence = first_sentence[:69].rstrip() + "..."
+            return first_sentence
+    return str(item.get("clip_label") or item.get("id") or "generated video")
 
 
 def compact_number(value: int | float) -> str:
@@ -477,15 +509,21 @@ class PostQueueManager:
         segments: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         if not clip_paths:
-            return self.list_items()
+            return []
 
         with self._lock:
             data = self._read()
             items = data.setdefault("items", [])
+            enqueued_items: list[dict[str, Any]] = []
             existing_keys = {
                 (str(item.get("source_id") or ""), str(item.get("original_name") or ""))
                 for item in items
                 if str(item.get("status") or "") in POST_QUEUE_KEEP_STATES
+            }
+            existing_story_keys = {
+                identity
+                for item in items
+                for identity in story_item_identity_keys(dict(item))
             }
 
             for offset, clip_path in enumerate(clip_paths):
@@ -503,10 +541,6 @@ class PostQueueManager:
                 if key in existing_keys:
                     continue
 
-                item_id = uuid.uuid4().hex[:12]
-                stored_path = self.asset_root / f"{item_id}{clip_path.suffix.lower() or '.mp4'}"
-                shutil.copy2(clip_path, stored_path)
-                now = utc_now()
                 content_mode = normalize_content_mode(source_entry.get("content_mode"))
                 account_profile = normalize_account_profile(source_entry.get("account_profile"))
                 audience_language = normalize_audience_language(
@@ -514,6 +548,22 @@ class PostQueueManager:
                     account_profile=account_profile,
                 )
                 story_category = str(segment.get("story_category") or "").strip()
+                story_title = str(segment.get("story_title") or "").strip()
+                story_short_title = str(segment.get("story_short_title") or "").strip()
+                story_slug = str(segment.get("story_slug") or "").strip()
+                candidate_story_keys = story_item_identity_keys(
+                    {
+                        "story_slug": story_slug,
+                        "story_title": story_title,
+                        "segment_excerpt": segment.get("excerpt") or "",
+                    }
+                )
+                if candidate_story_keys and candidate_story_keys.intersection(existing_story_keys):
+                    continue
+                item_id = uuid.uuid4().hex[:12]
+                stored_path = self.asset_root / f"{item_id}{clip_path.suffix.lower() or '.mp4'}"
+                shutil.copy2(clip_path, stored_path)
+                now = utc_now()
                 story_hashtags = (
                     english_story_hashtags(story_category)
                     if audience_language == "en" and story_category
@@ -524,34 +574,39 @@ class PostQueueManager:
                     or source_entry.get("hashtags")
                     or hashtags_for_audience_language(audience_language, account_profile=account_profile)
                 )
-                items.append(
-                    self._normalize_item(
-                        {
-                            "id": item_id,
-                            "source_id": source_entry.get("id"),
-                            "source_url": source_entry.get("source_url"),
-                            "source_title": source_entry.get("title") or "Saved source",
-                            "content_mode": content_mode,
-                            "account_profile": account_profile,
-                            "audience_language": audience_language,
-                            "clip_label": clip_label,
-                            "clip_path": str(stored_path),
-                            "original_name": original_name,
-                            "segment_start": segment.get("start_seconds"),
-                            "segment_end": segment.get("end_seconds"),
-                            "segment_excerpt": segment.get("excerpt") or "",
-                            "story_category": story_category,
-                            "status": "pending",
-                            "hashtags": hashtags,
-                            "created_at": now,
-                            "updated_at": now,
-                        }
-                    )
+                queued_item = self._normalize_item(
+                    {
+                        "id": item_id,
+                        "source_id": source_entry.get("id"),
+                        "source_url": source_entry.get("source_url"),
+                        "source_title": source_entry.get("title") or "Saved source",
+                        "content_mode": content_mode,
+                        "account_profile": account_profile,
+                        "audience_language": audience_language,
+                        "clip_label": clip_label,
+                        "clip_path": str(stored_path),
+                        "original_name": original_name,
+                        "segment_start": segment.get("start_seconds"),
+                        "segment_end": segment.get("end_seconds"),
+                        "segment_excerpt": segment.get("excerpt") or "",
+                        "story_category": story_category,
+                        "story_title": story_title,
+                        "story_short_title": story_short_title,
+                        "story_slug": story_slug,
+                        "status": "pending",
+                        "hashtags": hashtags,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
                 )
+                items.append(queued_item)
+                enqueued_items.append(queued_item)
+                existing_keys.add(key)
+                existing_story_keys.update(candidate_story_keys)
 
             self._write(data)
 
-        return self.list_items()
+        return enqueued_items
 
     def allocated_count_for_source(self, source_id: str) -> int:
         count = 0
@@ -660,6 +715,9 @@ class PostQueueManager:
             "segment_end": safe_float(item.get("segment_end"), 0.0),
             "segment_excerpt": str(item.get("segment_excerpt") or ""),
             "story_category": str(item.get("story_category") or ""),
+            "story_title": str(item.get("story_title") or ""),
+            "story_short_title": str(item.get("story_short_title") or ""),
+            "story_slug": str(item.get("story_slug") or ""),
             "status": str(item.get("status") or "pending"),
             "publish_id": str(item.get("publish_id") or ""),
             "tiktok_status": str(item.get("tiktok_status") or ""),
@@ -763,6 +821,8 @@ class PerformanceMetricsStore:
                 "segment_end": clip.get("segment_end"),
                 "segment_excerpt": clip.get("segment_excerpt") or "",
                 "story_category": clip.get("story_category") or "",
+                "story_title": clip.get("story_title") or "",
+                "story_slug": clip.get("story_slug") or "",
             }
         )
         with self._lock:
@@ -846,6 +906,8 @@ class PerformanceMetricsStore:
                     "segment_end": clip.get("segment_end"),
                     "segment_excerpt": clip.get("segment_excerpt") or "",
                     "story_category": clip.get("story_category") or "",
+                    "story_title": clip.get("story_title") or "",
+                    "story_slug": clip.get("story_slug") or "",
                 }
             )
             items.append(metric)
@@ -874,6 +936,8 @@ class PerformanceMetricsStore:
                 str(item.get("id") or ""),
                 str(item.get("clip_label") or ""),
                 str(item.get("original_name") or ""),
+                str(item.get("story_title") or ""),
+                str(item.get("story_slug") or ""),
             ]
             for field in fields:
                 normalized_field = field.lower().replace("-", "_")
@@ -896,7 +960,7 @@ class PerformanceMetricsStore:
         for item in candidates[: max(1, limit)]:
             when = item.get("posted_at") or item.get("inbox_delivered_at") or item.get("updated_at") or ""
             status = item.get("status") or ""
-            label = item.get("clip_label") or item.get("id") or "clip"
+            label = clip_display_name(item)
             lines.append(f"- {label} [{content_mode_label(item.get('content_mode'))}] ({status}, {when})")
         return lines
 
@@ -947,7 +1011,7 @@ class PerformanceMetricsStore:
             likes = int(metric.get("likes") or 0)
             like_rate = float(metric.get("like_rate") or 0.0) * 100
             multiplier = views_count / median_views if median_views else 0.0
-            label = metric.get("clip_label") or metric.get("clip_id") or "clip"
+            label = clip_display_name(metric)
             mode_label = content_mode_label(metric.get("content_mode"))
             lines.append(
                 f"{index}. {label} [{mode_label}]: {compact_number(views_count)} views, "
@@ -1064,6 +1128,9 @@ class PerformanceMetricsStore:
             "segment_start",
             "segment_end",
             "segment_excerpt",
+            "story_category",
+            "story_title",
+            "story_slug",
         ):
             current_value = current.get(field)
             previous_value = previous.get(field)
@@ -1229,6 +1296,8 @@ class PerformanceMetricsStore:
             "segment_end": safe_float(metric.get("segment_end"), 0.0),
             "segment_excerpt": str(metric.get("segment_excerpt") or ""),
             "story_category": str(metric.get("story_category") or ""),
+            "story_title": str(metric.get("story_title") or ""),
+            "story_slug": str(metric.get("story_slug") or ""),
         }
 
     def _read(self) -> dict[str, Any]:
@@ -1923,10 +1992,10 @@ class AutomationController:
         return "English story batch is active. New story videos will be sent to the TikTok inbox."
 
     def _upload_delivery_message(self, item: dict[str, Any], mode_label: str) -> str:
-        label = item.get("clip_label") or "generated clip"
+        label = clip_display_name(item)
         if self._is_english_story_item(item):
             return (
-                f"English story video sent to TikTok inbox: {label}.\n"
+                f"English story sent to TikTok inbox: {label}.\n"
                 f"{self._caption_paste_message(item)}"
             )
         return (
@@ -1945,7 +2014,7 @@ class AutomationController:
             return {"ok": False, "message": "No TikTok inbox video is waiting to be marked as posted."}
 
         item = sorted(inbox_items, key=lambda value: value.get("inbox_delivered_at") or value.get("updated_at") or "")[0]
-        label = str(item.get("clip_label") or "video")
+        label = clip_display_name(item)
         source_id = str(item.get("source_id") or "")
         self._mark_item_posted(item, "MANUAL_POSTED", notify=False)
         return {
@@ -2066,19 +2135,27 @@ class AutomationController:
 
         segments = self._read_segments_for_output(output_dir)
         start_index = posted + pending_count + 1
-        self.post_queue.enqueue_clip_files(
+        queued_items = self.post_queue.enqueue_clip_files(
             source_entry,
             clip_paths,
             start_index=start_index,
             segments=segments,
         )
+        if not queued_items:
+            self.append_log(
+                f"Rejected duplicate story output from {source_entry.get('title') or source_url}; no TikTok upload was queued."
+            )
+            return
         caption_note = "with subtitles" if captioned else "without subtitles"
         mode_label = content_mode_label(source_entry.get("content_mode"))
         self.append_log(
             f"Queued {len(clip_paths)} {mode_label.lower()} clip(s) from {source_entry.get('title') or source_url} for TikTok upload."
         )
         if self._is_english_story_source(source_entry):
-            self.notify(f"Created a new English story video {caption_note}. Uploading it to the TikTok inbox now.")
+            self.notify(
+                f"Created English story: {clip_display_name(queued_items[0])} ({caption_note}). "
+                "Uploading it to the TikTok inbox now."
+            )
         else:
             self.notify(
                 f"Created {len(clip_paths)} {mode_label.lower()} video(s) {caption_note} from {source_entry.get('title') or source_url}. "
@@ -2245,7 +2322,7 @@ class AutomationController:
                     str(item.get("id")),
                     status="sent_to_inbox",
                     tiktok_status=remote_status,
-                    inbox_delivered_at=utc_now(),
+                    inbox_delivered_at=str(item.get("inbox_delivered_at") or utc_now()),
                     error="",
                 )
                 if not was_already_delivered:
@@ -2264,7 +2341,7 @@ class AutomationController:
                     and datetime.now(timezone.utc) - processing_started_at > processing_timeout
                 ):
                     message = (
-                        f"{item.get('clip_label') or 'generated clip'} stayed in TikTok {remote_status} "
+                        f"{clip_display_name(item)} stayed in TikTok {remote_status} "
                         f"for more than {self.processing_timeout_hours} hour(s); marking it stale so the source can continue."
                     )
                     self.post_queue.update_item(
@@ -2289,7 +2366,7 @@ class AutomationController:
                     tiktok_status=remote_status,
                     error=fail_reason or "TikTok reported a failed publish.",
                 )
-                message = f"{item.get('clip_label')} failed on TikTok: {fail_reason or 'unknown reason'}."
+                message = f"{clip_display_name(item)} failed on TikTok: {fail_reason or 'unknown reason'}."
                 self.append_log(message)
                 self.notify(message)
                 status_updates += 1
@@ -2398,7 +2475,7 @@ class AutomationController:
             views = int(metric.get("views") or 0)
             likes = int(metric.get("likes") or 0)
             like_rate = float(metric.get("like_rate") or 0.0) * 100
-            label = metric.get("clip_label") or "clip"
+            label = clip_display_name(metric)
             source = PerformanceMetricsStore._short_source(str(metric.get("source_url") or ""))
             message = (
                 f"Trend alert: {label} reached {compact_number(views)} views "
@@ -2581,6 +2658,29 @@ class AutomationController:
             for item in self.post_queue.list_items()
         )
 
+    def _seen_english_story_keys(self) -> set[str]:
+        return {
+            identity
+            for item in self.post_queue.list_items()
+            if self._is_english_story_item(item)
+            for identity in story_item_identity_keys(item)
+        }
+
+    def _unique_english_story_count(self) -> int:
+        identities: set[str] = set()
+        for item in self.post_queue.list_items():
+            if not self._is_english_story_item(item):
+                continue
+            keys = story_item_identity_keys(item)
+            primary = next((key for key in sorted(keys) if key.startswith("hook:")), "")
+            if not primary:
+                primary = next((key for key in sorted(keys) if key.startswith("slug:")), "")
+            if not primary:
+                primary = next(iter(sorted(keys)), "")
+            if primary:
+                identities.add(primary)
+        return len(identities)
+
     def _maybe_create_autonomous_english_source(self) -> dict[str, Any] | None:
         if not self._autonomous_english_enabled():
             return None
@@ -2589,11 +2689,7 @@ class AutomationController:
 
         planned_clips = int(MODE_PROFILES[CONTENT_MODE_MONETIZATION]["default_planned_clips"])
         batch_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        prior_story_count = sum(
-            1
-            for item in self.post_queue.list_items()
-            if str(item.get("source_url") or "").startswith(AUTONOMOUS_ENGLISH_SOURCE_URL)
-        )
+        prior_story_count = self._unique_english_story_count()
         rotation_offset = prior_story_count % max(1, story_rotation_size())
         batch_url = f"{AUTONOMOUS_ENGLISH_SOURCE_URL}/{batch_stamp}-r{rotation_offset:02d}"
         batch_title = f"{AUTONOMOUS_ENGLISH_SOURCE_TITLE} {batch_stamp}"
@@ -2760,6 +2856,7 @@ class AutomationController:
                     self.root,
                     source_entry,
                     sequence_index=sequence_index,
+                    excluded_story_keys=self._seen_english_story_keys(),
                     logger=job.log,
                 )
             except Exception as exc:
@@ -2921,13 +3018,13 @@ class AutomationController:
         clip_path = Path(str(item.get("clip_path") or "")).resolve()
         if not clip_path.exists():
             self.post_queue.update_item(item_id, status="failed", error="Queued clip file is missing.")
-            message = f"{item.get('clip_label')} could not be uploaded because the clip file is missing."
+            message = f"{clip_display_name(item)} could not be uploaded because the clip file is missing."
             self.append_log(message)
             self.notify(message)
             return
 
         self.post_queue.update_item(item_id, status="uploading", error="")
-        self.notify(f"Uploading {item.get('clip_label') or 'generated clip'} to TikTok inbox.")
+        self.notify(f"Uploading {clip_display_name(item)} to TikTok inbox.")
         try:
             result = self.publisher.upload_draft(clip_path)
         except Exception as exc:
@@ -2948,7 +3045,7 @@ class AutomationController:
                     f"{delay_minutes} minute(s): {message}"
                 )
                 self.notify(
-                    f"{item.get('clip_label') or 'generated clip'} upload will retry in {delay_minutes} minute(s): {message}"
+                    f"{clip_display_name(item)} upload will retry in {delay_minutes} minute(s): {message}"
                 )
                 return
 
@@ -2960,7 +3057,7 @@ class AutomationController:
                 error=message,
             )
             self.append_log(f"{item.get('clip_label')} upload failed: {message}")
-            self.notify(f"{item.get('clip_label') or 'generated clip'} upload failed: {message}")
+            self.notify(f"{clip_display_name(item)} upload failed: {message}")
             return
 
         status = str(result.get("status") or "").strip()
@@ -3018,9 +3115,9 @@ class AutomationController:
 
         self.append_log(f"{item.get('clip_label')} completed on TikTok and was removed from local queued storage.")
         if notify:
-            label = item.get("clip_label") or "latest"
+            label = clip_display_name(item)
             if self._is_english_story_item(item):
-                self.notify(f"Posted confirmed for English story video: {label}.")
+                self.notify(f"Posted confirmed for English story: {label}.")
             else:
                 self.notify(f"Posted confirmed for {label}. {self.source_progress_line(source_id)}")
 

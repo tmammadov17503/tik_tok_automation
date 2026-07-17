@@ -680,10 +680,16 @@ def generate_tiktok_story_clip(
     source_entry: dict[str, Any],
     *,
     sequence_index: int,
+    excluded_story_keys: set[str] | None = None,
     logger: Callable[[str], None] | None = None,
 ) -> StoryClipResult:
     log = logger or (lambda message: None)
-    story = build_story(source_entry, sequence_index=sequence_index, logger=log)
+    story, selection_index = _select_unseen_story(
+        source_entry,
+        sequence_index=sequence_index,
+        excluded_story_keys=excluded_story_keys,
+        logger=log,
+    )
     source_id = str(source_entry.get("id") or "source")
     output_dir = root / "output" / "story_reels" / _safe_name(source_id) / f"{_timestamp()}-{sequence_index:02d}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -743,6 +749,9 @@ def generate_tiktok_story_clip(
             "end_seconds": round(_media_duration(video_path), 2),
             "excerpt": story["hook"],
             "story_category": story.get("category") or "",
+            "story_title": story.get("title") or "",
+            "story_short_title": story.get("short_title") or "",
+            "story_slug": story.get("slug") or "",
             "reason": "Original English story reel generated for the autonomous story account.",
         }
     ]
@@ -753,6 +762,7 @@ def generate_tiktok_story_clip(
         "source_url": str(source_entry.get("source_url") or ""),
         "source_id": source_id,
         "sequence_index": sequence_index,
+        "story_selection_index": selection_index,
         "title": story["title"],
         "short_title": story["short_title"],
         "topic_slug": story["slug"],
@@ -803,6 +813,41 @@ def build_story(
         _build_library_story(source_entry, sequence_index=rotation_index),
         sequence_index=rotation_index,
     )
+
+
+def story_identity_keys(story: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    slug = re.sub(r"[^a-z0-9]+", "-", str(story.get("slug") or "").casefold()).strip("-")
+    hook = re.sub(r"[^a-z0-9]+", " ", str(story.get("hook") or "").casefold()).strip()
+    title = re.sub(r"[^a-z0-9]+", " ", str(story.get("title") or "").casefold()).strip()
+    if slug:
+        keys.add(f"slug:{slug}")
+    if hook:
+        keys.add(f"hook:{hook}")
+    if title:
+        keys.add(f"title:{title}")
+    return keys
+
+
+def _select_unseen_story(
+    source_entry: dict[str, Any],
+    *,
+    sequence_index: int,
+    excluded_story_keys: set[str] | None = None,
+    logger: Callable[[str], None] | None = None,
+) -> tuple[dict[str, Any], int]:
+    excluded = set(excluded_story_keys or set())
+    log = logger or (lambda message: None)
+    max_candidates = max(story_rotation_size() * 2, len(TOPIC_LIBRARY))
+    for offset in range(max_candidates):
+        candidate_index = max(1, sequence_index) + offset
+        story = build_story(source_entry, sequence_index=candidate_index, logger=log)
+        if not story_identity_keys(story).intersection(excluded):
+            if offset:
+                log(f"Skipped {offset} previously generated story candidate(s) before selecting a new topic.")
+            return story, _story_rotation_index(source_entry, sequence_index=candidate_index)
+        log(f"Skipping previously generated story topic: {story.get('title') or story.get('slug') or candidate_index}.")
+    raise RuntimeError("English story rotation could not find an unseen topic; add fresh topics before the next batch.")
 
 
 def story_rotation_size() -> int:

@@ -293,6 +293,34 @@ class StoryCaptionLayoutTests(unittest.TestCase):
         self.assertEqual(continued_story["category"], expected_story["category"])
         self.assertEqual(story.story_rotation_size(), len(story.GENRE_ROTATION))
 
+    def test_unseen_story_selection_skips_repeated_identity(self) -> None:
+        repeated = {
+            "slug": "dyatlov-pass-1959",
+            "title": "Repeated",
+            "hook": "Nine hikers entered the mountains.",
+            "category": "survival mystery",
+            "beats": [{"narration": "Repeated", "onscreen_text": "REPEATED"}],
+        }
+        unseen = {
+            "slug": "flannan-isles-1900",
+            "title": "Unseen",
+            "hook": "Three lighthouse keepers vanished.",
+            "category": "lost place mystery",
+            "beats": [{"narration": "Unseen", "onscreen_text": "UNSEEN"}],
+        }
+        seen = story.story_identity_keys(repeated)
+
+        with patch.object(story, "build_story", side_effect=[repeated, unseen]) as mocked:
+            selected, selection_index = story._select_unseen_story(
+                {"source_url": "story://autonomous-english-reels/test-r00"},
+                sequence_index=2,
+                excluded_story_keys=seen,
+            )
+
+        self.assertEqual(selected["slug"], "flannan-isles-1900")
+        self.assertEqual(selection_index, 3)
+        self.assertEqual(mocked.call_count, 2)
+
     def test_story_badges_match_new_niches(self) -> None:
         self.assertEqual(story._story_badge({"category": "lawsuit story"}), "LAWSUIT STORY")
         self.assertEqual(story._story_badge({"category": "cat animation"}), "CAT ANIMATION")
