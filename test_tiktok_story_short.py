@@ -310,7 +310,10 @@ class StoryCaptionLayoutTests(unittest.TestCase):
         }
         seen = story.story_identity_keys(repeated)
 
-        with patch.object(story, "build_story", side_effect=[repeated, unseen]) as mocked:
+        with (
+            patch.object(story, "_ai_story_discovery_enabled", return_value=False),
+            patch.object(story, "_build_library_story", side_effect=[repeated, unseen]) as mocked,
+        ):
             selected, selection_index = story._select_unseen_story(
                 {"source_url": "story://autonomous-english-reels/test-r00"},
                 sequence_index=2,
@@ -320,6 +323,67 @@ class StoryCaptionLayoutTests(unittest.TestCase):
         self.assertEqual(selected["slug"], "flannan-isles-1900")
         self.assertEqual(selection_index, 3)
         self.assertEqual(mocked.call_count, 2)
+
+    def test_ai_story_discovery_defaults_on_when_openai_is_configured(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-openai-key"}, clear=False):
+            os.environ.pop("TIKTOK_AI_STORY_DISCOVERY", None)
+            self.assertTrue(story._ai_story_discovery_enabled())
+
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "test-openai-key",
+                "TIKTOK_AI_STORY_DISCOVERY": "false",
+            },
+            clear=False,
+        ):
+            self.assertFalse(story._ai_story_discovery_enabled())
+
+    def test_ai_story_prompt_includes_previously_generated_topics(self) -> None:
+        prompt = story._ai_story_prompt(
+            {"title": "Autonomous English Story Batch"},
+            sequence_index=20,
+            genre="historical mystery",
+            excluded_story_keys={
+                "slug:flannan-isles-1900",
+                "title:the lighthouse keepers who vanished",
+                "hook:three lighthouse keepers vanished without a trace",
+            },
+        )
+
+        self.assertIn("Do not reuse or retell", prompt)
+        self.assertIn("the lighthouse keepers who vanished", prompt.lower())
+        self.assertIn("flannan-isles-1900", prompt.lower())
+
+    def test_ai_story_selection_recovers_after_library_is_exhausted(self) -> None:
+        seen = {
+            identity
+            for index in range(1, len(story.TOPIC_LIBRARY) + 1)
+            for identity in story.story_identity_keys(
+                story._build_library_story({}, sequence_index=index)
+            )
+        }
+        fresh_story = {
+            "slug": "fresh-original-story",
+            "title": "A Fresh Original Story",
+            "short_title": "FRESH STORY",
+            "hook": "This story has never appeared in the queue.",
+            "category": "original 2d animation story",
+            "beats": [{"narration": "Fresh narration", "onscreen_text": "FRESH STORY"}],
+        }
+
+        with (
+            patch.object(story, "_ai_story_discovery_enabled", return_value=True),
+            patch.object(story, "_build_ai_story", return_value=fresh_story) as mocked,
+        ):
+            selected, _selection_index = story._select_unseen_story(
+                {"source_url": "story://autonomous-english-reels/test-r00"},
+                sequence_index=1,
+                excluded_story_keys=seen,
+            )
+
+        self.assertEqual(selected["slug"], "fresh-original-story")
+        self.assertEqual(mocked.call_args.kwargs["excluded_story_keys"], seen)
 
     def test_story_badges_match_new_niches(self) -> None:
         self.assertEqual(story._story_badge({"category": "lawsuit story"}), "LAWSUIT STORY")

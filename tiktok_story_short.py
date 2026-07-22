@@ -64,6 +64,7 @@ POSTER_SAFE_TEXT_WIDTH = 860
 POSTER_MIN_FONT_SIZE = 54
 
 AI_STORY_DISABLED_VALUES = {"0", "false", "no", "off"}
+MAX_AI_STORY_CANDIDATES = 3
 GENRE_ROTATION = [
     "history shock",
     "mystery story",
@@ -802,11 +803,17 @@ def build_story(
     source_entry: dict[str, Any],
     *,
     sequence_index: int,
+    excluded_story_keys: set[str] | None = None,
     logger: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     log = logger or (lambda message: None)
     rotation_index = _story_rotation_index(source_entry, sequence_index=sequence_index)
-    ai_story = _build_ai_story(source_entry, sequence_index=rotation_index, logger=log)
+    ai_story = _build_ai_story(
+        source_entry,
+        sequence_index=rotation_index,
+        excluded_story_keys=excluded_story_keys,
+        logger=log,
+    )
     if ai_story is not None:
         return _with_opening_hook(ai_story, sequence_index=rotation_index)
     return _with_opening_hook(
@@ -838,14 +845,38 @@ def _select_unseen_story(
 ) -> tuple[dict[str, Any], int]:
     excluded = set(excluded_story_keys or set())
     log = logger or (lambda message: None)
+
+    if _ai_story_discovery_enabled():
+        for offset in range(MAX_AI_STORY_CANDIDATES):
+            candidate_index = max(1, sequence_index) + offset
+            rotation_index = _story_rotation_index(source_entry, sequence_index=candidate_index)
+            ai_story = _build_ai_story(
+                source_entry,
+                sequence_index=rotation_index,
+                excluded_story_keys=excluded,
+                logger=log,
+            )
+            if ai_story is None:
+                continue
+            story = _with_opening_hook(ai_story, sequence_index=rotation_index)
+            if not story_identity_keys(story).intersection(excluded):
+                if offset:
+                    log(f"Skipped {offset} repeated AI story candidate(s) before selecting a new topic.")
+                return story, rotation_index
+            log(f"Skipping repeated AI story topic: {story.get('title') or story.get('slug') or candidate_index}.")
+
     max_candidates = max(story_rotation_size() * 2, len(TOPIC_LIBRARY))
     for offset in range(max_candidates):
         candidate_index = max(1, sequence_index) + offset
-        story = build_story(source_entry, sequence_index=candidate_index, logger=log)
+        rotation_index = _story_rotation_index(source_entry, sequence_index=candidate_index)
+        story = _with_opening_hook(
+            _build_library_story(source_entry, sequence_index=rotation_index),
+            sequence_index=rotation_index,
+        )
         if not story_identity_keys(story).intersection(excluded):
             if offset:
                 log(f"Skipped {offset} previously generated story candidate(s) before selecting a new topic.")
-            return story, _story_rotation_index(source_entry, sequence_index=candidate_index)
+            return story, rotation_index
         log(f"Skipping previously generated story topic: {story.get('title') or story.get('slug') or candidate_index}.")
     raise RuntimeError("English story rotation could not find an unseen topic; add fresh topics before the next batch.")
 
@@ -921,16 +952,20 @@ def _build_ai_story(
     source_entry: dict[str, Any],
     *,
     sequence_index: int,
+    excluded_story_keys: set[str] | None = None,
     logger: Callable[[str], None],
 ) -> dict[str, Any] | None:
-    if os.getenv("TIKTOK_AI_STORY_DISCOVERY", "false").strip().lower() in AI_STORY_DISABLED_VALUES:
-        return None
-    if not os.getenv("OPENAI_API_KEY", "").strip():
+    if not _ai_story_discovery_enabled():
         return None
 
     genre = GENRE_ROTATION[(max(1, sequence_index) - 1) % len(GENRE_ROTATION)]
     try:
-        payload = _request_ai_story_payload(source_entry, sequence_index=sequence_index, genre=genre)
+        payload = _request_ai_story_payload(
+            source_entry,
+            sequence_index=sequence_index,
+            genre=genre,
+            excluded_story_keys=excluded_story_keys,
+        )
         story = _normalize_ai_story(payload, source_entry=source_entry, sequence_index=sequence_index, genre=genre)
     except Exception as exc:
         logger(f"AI story discovery failed, using fallback library: {exc}")
@@ -940,12 +975,30 @@ def _build_ai_story(
     return story
 
 
-def _request_ai_story_payload(source_entry: dict[str, Any], *, sequence_index: int, genre: str) -> dict[str, Any]:
+def _ai_story_discovery_enabled() -> bool:
+    setting = os.getenv("TIKTOK_AI_STORY_DISCOVERY", "auto").strip().lower()
+    if setting in AI_STORY_DISABLED_VALUES:
+        return False
+    return bool(os.getenv("OPENAI_API_KEY", "").strip())
+
+
+def _request_ai_story_payload(
+    source_entry: dict[str, Any],
+    *,
+    sequence_index: int,
+    genre: str,
+    excluded_story_keys: set[str] | None = None,
+) -> dict[str, Any]:
     from openai import OpenAI
 
     client = OpenAI()
     model = os.getenv("OPENAI_STORY_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
-    prompt = _ai_story_prompt(source_entry, sequence_index=sequence_index, genre=genre)
+    prompt = _ai_story_prompt(
+        source_entry,
+        sequence_index=sequence_index,
+        genre=genre,
+        excluded_story_keys=excluded_story_keys,
+    )
     completion = client.chat.completions.create(
         model=model,
         messages=[
@@ -968,10 +1021,22 @@ def _request_ai_story_payload(source_entry: dict[str, Any], *, sequence_index: i
     return _json_from_text(content)
 
 
-def _ai_story_prompt(source_entry: dict[str, Any], *, sequence_index: int, genre: str) -> str:
+def _ai_story_prompt(
+    source_entry: dict[str, Any],
+    *,
+    sequence_index: int,
+    genre: str,
+    excluded_story_keys: set[str] | None = None,
+) -> str:
     source_title = str(source_entry.get("title") or "").strip()
     source_hint = f"Current batch title: {source_title}." if source_title else "No user source was provided."
     previous_topics = ", ".join(topic["title"] for topic in TOPIC_LIBRARY[:8])
+    excluded_topics = _excluded_story_prompt_values(excluded_story_keys)
+    exclusion_note = (
+        f"Previously generated identities. Do not reuse or retell any of these: {', '.join(excluded_topics)}.\n"
+        if excluded_topics
+        else ""
+    )
     return (
         f"Create one fresh vertical short story for English TikTok monetization.\n"
         f"Slot: {sequence_index}. Genre lane: {genre}. {source_hint}\n"
@@ -979,6 +1044,7 @@ def _ai_story_prompt(source_entry: dict[str, Any], *, sequence_index: int, genre
         "cat animations, world economy stories, 2D animation fables, eerie folklore, survival stories, ancient mysteries, "
         "lost places, and dark biographies.\n"
         f"Do not reuse these fallback examples directly: {previous_topics}.\n"
+        f"{exclusion_note}"
         "Requirements:\n"
         "- 8 beats exactly.\n"
         "- Each beat narration is 16 to 27 spoken words, simple and punchy.\n"
@@ -996,6 +1062,22 @@ def _ai_story_prompt(source_entry: dict[str, Any], *, sequence_index: int, genre
         "Return JSON with keys: slug, title, short_title, hook, category, beats. "
         "beats is an array of objects with label, narration, onscreen_text, visual, palette."
     )
+
+
+def _excluded_story_prompt_values(excluded_story_keys: set[str] | None, *, limit: int = 60) -> list[str]:
+    values: list[str] = []
+    keys = {str(key) for key in excluded_story_keys or set()}
+    for wanted_prefix in ("title", "slug", "hook"):
+        for key in sorted(keys):
+            prefix, separator, value = key.partition(":")
+            if not separator or prefix != wanted_prefix:
+                continue
+            cleaned = value.strip()
+            if cleaned and cleaned not in values:
+                values.append(cleaned)
+            if len(values) >= limit:
+                return values
+    return values
 
 
 def _normalize_ai_story(
