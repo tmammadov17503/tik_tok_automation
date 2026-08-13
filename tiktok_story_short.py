@@ -65,26 +65,63 @@ POSTER_MIN_FONT_SIZE = 54
 
 AI_STORY_DISABLED_VALUES = {"0", "false", "no", "off"}
 MAX_AI_STORY_CANDIDATES = 3
+# One 24-video strategy cycle: 50% history/mystery, 25% legal,
+# and 25% controlled experiments across the remaining requested niches.
 GENRE_ROTATION = [
+    "historical mystery",
+    "lawsuit story",
+    "ancient mystery",
+    "court case",
     "history shock",
+    "survival story",
     "mystery story",
     "lawsuit story",
-    "court case",
-    "reddit-style storytime",
-    "cat animation",
-    "world economy story",
-    "2d animation moral story",
     "strange true history",
-    "survival story",
-    "forgotten historical betrayal",
+    "court case",
     "lost place mystery",
+    "world economy story",
+    "forgotten historical betrayal",
+    "lawsuit story",
     "folklore legend",
-    "ancient mystery",
-    "dark biography",
-    "unbelievable true story",
+    "court case",
     "historical mystery",
+    "reddit-style storytime",
+    "ancient mystery",
+    "survival story",
+    "dark biography",
+    "mystery story",
+    "cat animation",
+    "2d animation moral story",
+]
+FALLBACK_TOPIC_SLUGS = [
+    "mary-celeste-1872",
+    "hot-coffee-lawsuit-1994",
+    "antikythera-mechanism",
+    "miranda-rights-1966",
+    "mosaddegh-1953-iran",
+    "dyatlov-pass-1959",
+    "tamam-shud-1948",
+    "leonard-v-pepsico-1999",
+    "dancing-plague-1518",
+    "brown-board-1954",
+    "flannan-isles-1900",
+    "tulip-mania-1637",
+    "sankara-1987-burkina-faso",
+    "palsgraf-1928",
+    "bell-witch-1817",
+    "gideon-wainwright-1963",
+    "db-cooper-1971",
+    "forum-wallet-confession",
+    "kimpa-vita-1706-kongo",
+    "shackleton-endurance-1915",
+    "lumumba-1961-congo",
+    "roanoke-colony-1590",
+    "cat-lighthouse-animation",
+    "shadow-town-2d-animation",
 ]
 STORY_ROTATION_SUFFIX = re.compile(r"-r(?P<offset>\d+)$", re.IGNORECASE)
+FOLLOW_CTA = "Follow for tomorrow's 60-second story."
+LEGACY_FOLLOW_CTA = "Follow for tomorrow's true 60-second story."
 HOOK_OPENERS = [
     "Did you know this actually happened?",
     "Have you ever heard this story?",
@@ -92,6 +129,10 @@ HOOK_OPENERS = [
     "This sounds fake, but it happened.",
     "You probably never heard this part.",
 ]
+
+
+class StoryDiscoveryUnavailable(RuntimeError):
+    """A fresh story is temporarily unavailable without repeating content."""
 
 TOPIC_LIBRARY: list[dict[str, Any]] = [
     {
@@ -638,6 +679,139 @@ TOPIC_LIBRARY: list[dict[str, Any]] = [
             },
         ],
     },
+    {
+        "slug": "leonard-v-pepsico-1999",
+        "short_title": "THE JET IN THE AD",
+        "title": "The Lawsuit Over A Fighter Jet Advertisement",
+        "figure": "John Leonard",
+        "role": "a student who treated a joke in a rewards advertisement like a real offer",
+        "year": "1999",
+        "place": "New York, United States",
+        "mission": "he tried to claim the advertised Harrier jet by gathering points and money",
+        "pressure": "the company said the jet was an obvious joke, while the lawsuit argued the ad looked like an offer",
+        "turn": "the court ruled that no reasonable viewer would believe a military jet was genuinely available",
+        "aftermath": "the case became a famous lesson about jokes, advertisements, and what counts as a legal offer",
+        "hook": "A rewards commercial showed a fighter jet. One viewer tried to collect it for real.",
+        "category": "lawsuit story",
+        "reference_url": "https://law.justia.com/cases/federal/district-courts/FSupp2/88/116/2579076/",
+    },
+    {
+        "slug": "palsgraf-1928",
+        "short_title": "THE ACCIDENT NOBODY SAW",
+        "title": "The Lawsuit About An Impossible Chain Reaction",
+        "figure": "Helen Palsgraf",
+        "role": "a railway passenger injured after a distant package of fireworks exploded",
+        "subject_pronoun": "she",
+        "year": "1928",
+        "place": "New York, United States",
+        "mission": "she asked the courts to decide who was responsible for a bizarre chain of events",
+        "pressure": "railroad workers had helped another passenger aboard without knowing his package held fireworks",
+        "turn": "the explosion knocked over equipment far away, but the highest state court found the injury was not foreseeable",
+        "aftermath": "the dispute became one of the most taught cases about duty and limits on negligence",
+        "hook": "A dropped package exploded, and something across the station injured a stranger. Who was responsible?",
+        "category": "lawsuit story",
+        "reference_url": "https://law.justia.com/cases/new-york/court-of-appeals/1928/248-n-y-339-1928.html",
+    },
+    {
+        "slug": "brown-board-1954",
+        "short_title": "THE CLASSROOM RULING",
+        "title": "The Court Case That Rejected Separate Schools",
+        "figure": "the Brown v. Board families",
+        "role": "families challenging racial segregation in public schools",
+        "subject_pronoun": "they",
+        "year": "1954",
+        "place": "Washington, D.C.",
+        "mission": "they argued that separate public schools denied children equal protection",
+        "pressure": "segregation was embedded in law and defended as a system that could remain separate but equal",
+        "turn": "the Supreme Court unanimously held that separate educational facilities are inherently unequal",
+        "aftermath": "the ruling became a constitutional landmark even as implementation faced years of resistance",
+        "hook": "A classroom case forced the highest court to answer whether separate could ever be equal.",
+        "category": "court case",
+        "reference_url": "https://www.archives.gov/milestone-documents/brown-v-board-of-education",
+    },
+    {
+        "slug": "gideon-wainwright-1963",
+        "short_title": "THE LETTER FROM PRISON",
+        "title": "The Prison Letter That Changed The Right To A Lawyer",
+        "figure": "Clarence Gideon",
+        "role": "a defendant who could not afford a lawyer for his felony trial",
+        "year": "1963",
+        "place": "Washington, D.C.",
+        "mission": "he asked the Supreme Court to decide whether a fair trial required appointed counsel",
+        "pressure": "Florida had refused his request, leaving him to defend himself before a jury",
+        "turn": "the Supreme Court unanimously ruled that states must provide lawyers in serious criminal cases",
+        "aftermath": "the handwritten petition reshaped the right to counsel across American courtrooms",
+        "hook": "A prisoner wrote his own petition in pencil. It changed who gets a lawyer in court.",
+        "category": "court case",
+        "reference_url": "https://www.loc.gov/item/2021667636",
+    },
+    {
+        "slug": "antikythera-mechanism",
+        "short_title": "THE ANCIENT COMPUTER",
+        "title": "The Machine Too Advanced For Its Shipwreck",
+        "figure": "the Antikythera mechanism",
+        "role": "an ancient Greek geared device recovered from a Mediterranean shipwreck",
+        "subject_pronoun": "it",
+        "year": "1901",
+        "place": "Antikythera, Greece",
+        "mission": "it used interlocking gears to model astronomical cycles and predict events such as eclipses",
+        "pressure": "corrosion hid its complexity, and nothing else from the era seemed to match its engineering",
+        "turn": "modern imaging revealed a machine far more sophisticated than its broken fragments suggested",
+        "aftermath": "the mechanism transformed what historians believed ancient engineers could build",
+        "hook": "Divers found a corroded lump in a shipwreck. Inside was a machine centuries ahead of expectation.",
+        "category": "ancient mystery",
+        "reference_url": "https://antikythera-mechanism.namuseum.gr/en/",
+    },
+    {
+        "slug": "shackleton-endurance-1915",
+        "short_title": "TRAPPED IN THE ICE",
+        "title": "The Expedition That Survived A Crushed Ship",
+        "figure": "Ernest Shackleton",
+        "role": "the leader of the Endurance expedition in Antarctica",
+        "year": "1915",
+        "place": "the Weddell Sea, Antarctica",
+        "mission": "he tried to bring every member of his stranded crew home alive",
+        "pressure": "pack ice trapped and crushed their ship, leaving the men camped on moving frozen ocean",
+        "turn": "a desperate open-boat journey and mountain crossing finally reached help",
+        "aftermath": "all twenty-eight members of the Endurance party survived the ordeal",
+        "hook": "The ice crushed their ship and erased the route home. Their leader refused to lose a single man.",
+        "category": "survival story",
+        "reference_url": "https://www.rmg.co.uk/stories/maritime-history/history-antarctic-explorers",
+    },
+    {
+        "slug": "db-cooper-1971",
+        "short_title": "THE MAN WHO JUMPED",
+        "title": "The Hijacker Who Vanished Into The Night",
+        "figure": "D. B. Cooper",
+        "role": "the alias used by an unidentified airplane hijacker",
+        "subject_pronoun": "he",
+        "year": "1971",
+        "place": "the Pacific Northwest, United States",
+        "mission": "he demanded ransom money and parachutes, then released the passengers",
+        "pressure": "the plane took off again into cold darkness while investigators tracked it from the ground",
+        "turn": "he jumped from the rear stairs with the ransom and was never conclusively found",
+        "aftermath": "some ransom bills surfaced years later, but his identity and fate remain unresolved",
+        "hook": "A quiet passenger collected a ransom, opened the rear stairs, and disappeared into the night.",
+        "category": "historical mystery",
+        "reference_url": "https://www.fbi.gov/history/cases-and-criminals/db-cooper-hijacking",
+    },
+    {
+        "slug": "roanoke-colony-1590",
+        "short_title": "THE COLONY WAS GONE",
+        "title": "The Colony That Left One Carved Word",
+        "figure": "the Roanoke colonists",
+        "role": "more than one hundred English settlers left on Roanoke Island",
+        "subject_pronoun": "they",
+        "year": "1590",
+        "place": "Roanoke Island, North Carolina",
+        "mission": "they tried to establish a permanent settlement while waiting for supplies from England",
+        "pressure": "war delayed the governor's return for three years, leaving the colony isolated",
+        "turn": "when help arrived, the settlement had been dismantled and the word Croatoan was carved into a post",
+        "aftermath": "evidence suggests relocation, but no single explanation for every colonist has been proven",
+        "hook": "A governor returned after three years. The colony was empty, and one carved word remained.",
+        "category": "lost place mystery",
+        "reference_url": "https://www.nps.gov/fora/learn/historyculture/the-lost-colony.htm",
+    },
 ]
 
 
@@ -846,10 +1020,10 @@ def _select_unseen_story(
     excluded = set(excluded_story_keys or set())
     log = logger or (lambda message: None)
 
+    requested_rotation_index = _story_rotation_index(source_entry, sequence_index=max(1, sequence_index))
     if _ai_story_discovery_enabled():
         for offset in range(MAX_AI_STORY_CANDIDATES):
-            candidate_index = max(1, sequence_index) + offset
-            rotation_index = _story_rotation_index(source_entry, sequence_index=candidate_index)
+            rotation_index = requested_rotation_index + (offset * story_rotation_size())
             ai_story = _build_ai_story(
                 source_entry,
                 sequence_index=rotation_index,
@@ -862,23 +1036,27 @@ def _select_unseen_story(
             if not story_identity_keys(story).intersection(excluded):
                 if offset:
                     log(f"Skipped {offset} repeated AI story candidate(s) before selecting a new topic.")
-                return story, rotation_index
-            log(f"Skipping repeated AI story topic: {story.get('title') or story.get('slug') or candidate_index}.")
+                return story, requested_rotation_index
+            log(f"Skipping repeated AI story topic: {story.get('title') or story.get('slug') or rotation_index}.")
 
-    max_candidates = max(story_rotation_size() * 2, len(TOPIC_LIBRARY))
-    for offset in range(max_candidates):
-        candidate_index = max(1, sequence_index) + offset
-        rotation_index = _story_rotation_index(source_entry, sequence_index=candidate_index)
+    lane = GENRE_ROTATION[(requested_rotation_index - 1) % len(GENRE_ROTATION)]
+    candidates = _fallback_candidates(requested_rotation_index, lane)
+    if not candidates:
+        raise StoryDiscoveryUnavailable(f"English story fallback has no topic for requested lane: {lane}.")
+    for offset in range(len(candidates)):
+        topic = candidates[offset]
         story = _with_opening_hook(
-            _build_library_story(source_entry, sequence_index=rotation_index),
-            sequence_index=rotation_index,
+            _library_story_from_topic(source_entry, topic=topic, lane=lane),
+            sequence_index=requested_rotation_index,
         )
         if not story_identity_keys(story).intersection(excluded):
             if offset:
-                log(f"Skipped {offset} previously generated story candidate(s) before selecting a new topic.")
-            return story, rotation_index
-        log(f"Skipping previously generated story topic: {story.get('title') or story.get('slug') or candidate_index}.")
-    raise RuntimeError("English story rotation could not find an unseen topic; add fresh topics before the next batch.")
+                log(f"Skipped {offset} used fallback topic(s) inside the {lane} lane.")
+            return story, requested_rotation_index
+        log(f"Skipping previously generated fallback topic: {story.get('title') or story.get('slug')}.")
+    raise StoryDiscoveryUnavailable(
+        f"English story fallback exhausted the {lane} lane; AI discovery is needed for a fresh topic."
+    )
 
 
 def story_rotation_size() -> int:
@@ -895,18 +1073,37 @@ def _story_rotation_index(source_entry: dict[str, Any], *, sequence_index: int) 
 def _build_library_story(source_entry: dict[str, Any], *, sequence_index: int) -> dict[str, Any]:
     lane_index = max(1, sequence_index) - 1
     lane = GENRE_ROTATION[lane_index % len(GENRE_ROTATION)]
-    candidates = [topic for topic in TOPIC_LIBRARY if _topic_matches_lane(topic, lane)]
+    candidates = _fallback_candidates(max(1, sequence_index), lane)
     if not candidates:
-        candidates = list(TOPIC_LIBRARY)
-    topic = candidates[lane_index % len(candidates)]
+        raise StoryDiscoveryUnavailable(f"English story fallback has no topic for requested lane: {lane}.")
+    return _library_story_from_topic(source_entry, topic=candidates[0], lane=lane)
+
+
+def _fallback_candidates(rotation_index: int, lane: str) -> list[dict[str, Any]]:
+    position = (max(1, rotation_index) - 1) % len(GENRE_ROTATION)
+    preferred_slug = FALLBACK_TOPIC_SLUGS[position]
+    preferred = next((topic for topic in TOPIC_LIBRARY if topic.get("slug") == preferred_slug), None)
+    lane_candidates = [topic for topic in TOPIC_LIBRARY if _topic_matches_lane(topic, lane)]
+    if preferred is None:
+        return lane_candidates
+    return [preferred, *(topic for topic in lane_candidates if topic is not preferred)]
+
+
+def _library_story_from_topic(
+    source_entry: dict[str, Any],
+    *,
+    topic: dict[str, Any],
+    lane: str,
+) -> dict[str, Any]:
     beats = _beats_for_topic(topic)
     return {
         "slug": topic["slug"],
         "title": topic["title"],
         "short_title": topic["short_title"],
         "hook": topic["hook"],
-        "category": topic.get("category") or "true history story",
+        "category": lane,
         "source_url": str(source_entry.get("source_url") or ""),
+        "reference_url": str(topic.get("reference_url") or ""),
         "story_source": "library",
         "beats": beats,
     }
@@ -1119,7 +1316,9 @@ def _normalize_ai_story(
     title = _clean(payload.get("title")) or f"English Story {sequence_index}"
     short_title = _clean(payload.get("short_title")) or title
     hook = _clean(payload.get("hook")) or beats[0]["narration"]
-    category = _clean(payload.get("category")) or genre
+    # The scheduler owns the content lane. Treat model-provided category text as
+    # descriptive only so visual styling, captions, and hashtags cannot drift.
+    category = genre
     slug = _safe_name(_clean(payload.get("slug")) or f"{genre}-{sequence_index}").lower()
     return {
         "slug": slug,
@@ -1160,6 +1359,16 @@ def _with_opening_hook(story: dict[str, Any], *, sequence_index: int) -> dict[st
         first["narration"] = f"{opener} {narration}"
         first["label"] = _clean(first.get("label") or "The Hook") or "The Hook"
     beats[0] = first
+    last = dict(beats[-1])
+    final_narration = _clean(last.get("narration"))
+    normalized_final = _normalized_spoken_phrase(final_narration)
+    known_ctas = {
+        _normalized_spoken_phrase(FOLLOW_CTA),
+        _normalized_spoken_phrase(LEGACY_FOLLOW_CTA),
+    }
+    if not any(cta and cta in normalized_final for cta in known_ctas):
+        last["narration"] = f"{final_narration} {FOLLOW_CTA}".strip()
+    beats[-1] = last
     enriched = dict(story)
     enriched["beats"] = beats
     return enriched
@@ -1176,6 +1385,10 @@ def _starts_with_curiosity_hook(text: str) -> bool:
         "you probably never",
     )
     return any(lowered.startswith(starter) for starter in starters)
+
+
+def _normalized_spoken_phrase(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").casefold()).strip()
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
@@ -1788,7 +2001,10 @@ def _beats_for_topic(topic: dict[str, Any]) -> list[dict[str, str]]:
             for index, beat in enumerate(custom_beats, start=1)
             if isinstance(beat, dict)
         ]
+    if str(topic.get("category") or "").strip():
+        return _event_beats_for_topic(topic)
     figure = topic["figure"]
+    pronoun = str(topic.get("subject_pronoun") or "he").strip().capitalize()
     beats = [
         {
             "label": "The Hook",
@@ -1802,7 +2018,7 @@ def _beats_for_topic(topic: dict[str, Any]) -> list[dict[str, str]]:
         },
         {
             "label": "The Rise",
-            "narration": f"He was {topic['role']}, and his promise was not small: {topic['mission']}.",
+            "narration": f"{pronoun} was {topic['role']}, and the goal was not small: {topic['mission']}.",
             "onscreen_text": "THE PROMISE WAS HUGE",
         },
         {
@@ -1834,6 +2050,53 @@ def _beats_for_topic(topic: dict[str, Any]) -> list[dict[str, str]]:
     return [_with_default_visual(topic, beat, index) for index, beat in enumerate(beats, start=1)]
 
 
+def _event_beats_for_topic(topic: dict[str, Any]) -> list[dict[str, str]]:
+    figure = str(topic["figure"])
+    beats = [
+        {
+            "label": "The Hook",
+            "narration": str(topic["hook"]),
+            "onscreen_text": str(topic["short_title"]),
+        },
+        {
+            "label": "The Setup",
+            "narration": f"In {topic['year']}, in {topic['place']}, the story centered on {figure}.",
+            "onscreen_text": f"{topic['year']}. {str(topic['place']).split(',', 1)[0].upper()}",
+        },
+        {
+            "label": "The Goal",
+            "narration": f"At the center was {topic['role']}. The goal was clear: {topic['mission']}.",
+            "onscreen_text": "THE GOAL WAS CLEAR",
+        },
+        {
+            "label": "The Problem",
+            "narration": "But one detail made the situation much harder than anyone first understood.",
+            "onscreen_text": "ONE DETAIL CHANGED IT",
+        },
+        {
+            "label": "The Pressure",
+            "narration": f"The pressure grew because {topic['pressure']}.",
+            "onscreen_text": "THE PRESSURE GREW",
+        },
+        {
+            "label": "The Turn",
+            "narration": f"Then the decisive turn came: {topic['turn']}.",
+            "onscreen_text": "THEN EVERYTHING TURNED",
+        },
+        {
+            "label": "The Aftermath",
+            "narration": f"Afterward, {topic['aftermath']}.",
+            "onscreen_text": "THE EFFECTS LASTED",
+        },
+        {
+            "label": "Why It Matters",
+            "narration": f"That is why {figure} still matters: one story, one turning point, and consequences people still study.",
+            "onscreen_text": "WHY IT STILL MATTERS",
+        },
+    ]
+    return [_with_default_visual(topic, beat, index) for index, beat in enumerate(beats, start=1)]
+
+
 def _with_default_visual(topic: dict[str, Any], beat: dict[str, str], index: int) -> dict[str, str]:
     enriched = dict(beat)
     figure = topic.get("figure", "the central character")
@@ -1842,11 +2105,11 @@ def _with_default_visual(topic: dict[str, Any], beat: dict[str, str], index: int
     visual_templates = [
         f"dramatic opening portrait of {figure} in {place}, {year}, surrounded by symbolic clues from the story",
         f"wide establishing scene of {place} in {year}, architecture, weather, and tense atmosphere",
-        f"{figure} making an important choice, papers, maps, witnesses, and period objects around them",
-        "powerful opponents watching from shadows, official rooms, documents, guards, and pressure closing in",
-        "the conflict escalating, dramatic lighting, worried faces, symbolic evidence, and a sense of danger",
-        "the betrayal or turning point moment, cinematic composition, urgent movement, no gore",
-        "aftermath scene showing consequences, empty rooms, broken symbols, people reacting in silence",
+        f"the central subject, {figure}, shown with accurate period objects and visual clues",
+        "the key problem represented through evidence, witnesses, maps, machinery, or environmental obstacles",
+        "pressure escalating through dramatic lighting, expressive faces, documents, weather, or physical clues",
+        "the decisive turning point, cinematic composition, clear action, no gore",
+        "the aftermath and consequences, changed surroundings, evidence, and people reacting",
         f"final memorable portrait of {figure}, historical props, dramatic light, unresolved mood",
     ]
     enriched.setdefault("visual", visual_templates[(index - 1) % len(visual_templates)])

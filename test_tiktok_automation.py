@@ -6,6 +6,7 @@ from tiktok_automation import (
     AutomationController,
     PostQueueManager,
     english_story_hashtags,
+    english_story_lane,
     story_item_identity_keys,
 )
 
@@ -21,6 +22,67 @@ class EnglishStoryDistributionTests(unittest.TestCase):
         self.assertIn("#lawtok", court_tags)
         self.assertIn("#courtcase", court_tags)
         self.assertNotEqual(cat_tags, court_tags)
+
+    def test_story_lane_is_determined_by_category_not_transcript_keywords(self) -> None:
+        self.assertEqual(english_story_lane("world economy story"), "economy")
+        self.assertEqual(english_story_lane("cat animation"), "cat")
+        self.assertEqual(english_story_lane("strange true history"), "history")
+
+    def test_story_caption_repairs_stale_hashtags_and_ignores_unrelated_excerpt_words(self) -> None:
+        controller = AutomationController.__new__(AutomationController)
+        controller.post_queue = type("Queue", (), {"default_hashtags": ["#storytime"]})()
+        item = {
+            "source_id": "source-economy",
+            "clip_label": "story_01_vertical_captioned",
+            "content_mode": "monetization",
+            "account_profile": "future_en",
+            "audience_language": "en",
+            "story_category": "world economy story",
+            "segment_excerpt": "A cat entered court and posted a confession before the market crashed.",
+            "hashtags": english_story_hashtags("cat animation"),
+        }
+
+        caption = controller._caption_hint_for_item(item)
+
+        self.assertIn("#economics", caption)
+        self.assertIn("#moneyhistory", caption)
+        self.assertNotIn("#catsoftiktok", caption)
+        self.assertTrue(any(phrase in caption for phrase in ("price", "economy", "excitement")))
+
+    def test_public_reconciliation_uses_repaired_story_hashtags(self) -> None:
+        controller = AutomationController.__new__(AutomationController)
+        clip = {
+            "account_profile": "future_en",
+            "audience_language": "en",
+            "story_category": "world economy story",
+            "hashtags": english_story_hashtags("cat animation"),
+        }
+
+        expected = controller._expected_public_match_hashtags(clip)
+
+        self.assertIn("#economics", expected)
+        self.assertIn("#moneyhistory", expected)
+        self.assertNotIn("#catsoftiktok", expected)
+
+    def test_story_discovery_wait_does_not_increment_source_failures(self) -> None:
+        controller = AutomationController.__new__(AutomationController)
+        calls: list[str] = []
+        controller.sources = type(
+            "Sources",
+            (),
+            {"mark_source_failure": lambda _self, *_args, **_kwargs: calls.append("failure")},
+        )()
+        controller.append_log = lambda _message: None
+        controller.notify = lambda _message: None
+
+        from tiktok_story_short import StoryDiscoveryUnavailable
+
+        controller._record_source_generation_failure(
+            {"id": "story-source", "title": "English stories", "source_url": "story://batch"},
+            StoryDiscoveryUnavailable("fresh topic unavailable"),
+        )
+
+        self.assertEqual(calls, [])
 
     def test_story_category_and_hashtags_survive_queueing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,6 +207,7 @@ class EnglishStoryDistributionTests(unittest.TestCase):
 
         self.assertIn("The Lighthouse Keepers Who Vanished", message)
         self.assertNotIn("money_02", message)
+        self.assertIn("AI-generated content label", message)
 
     def test_remote_inbox_refresh_preserves_first_delivery_time(self) -> None:
         original_time = "2026-07-11T22:55:03Z"

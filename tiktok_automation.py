@@ -15,6 +15,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from tiktok_story_short import (
+    StoryDiscoveryUnavailable,
     english_story_mode_enabled,
     generate_tiktok_story_clip,
     story_identity_keys,
@@ -169,25 +170,76 @@ def hashtags_for_audience_language(value: Any, *, account_profile: Any = None) -
     return list(CANONICAL_TIKTOK_HASHTAGS)
 
 
-def english_story_hashtags(category: Any) -> list[str]:
+def english_story_lane(category: Any) -> str:
     key = str(category or "").strip().casefold()
     if "lawsuit" in key:
-        return ["#storytime", "#lawtok", "#lawsuit", "#didyouknow", "#learnontiktok"]
+        return "lawsuit"
     if "court" in key or "legal" in key:
-        return ["#storytime", "#lawtok", "#courtcase", "#didyouknow", "#learnontiktok"]
+        return "court"
     if "reddit" in key or "forum" in key or "confession" in key:
-        return ["#storytime", "#redditstories", "#confession", "#storytelling", "#didyouknow"]
+        return "reddit"
     if "cat" in key:
-        return ["#catsoftiktok", "#animation", "#storytime", "#cattok", "#didyouknow"]
+        return "cat"
     if "economy" in key or "market" in key or "money" in key:
-        return ["#economics", "#moneyhistory", "#storytime", "#didyouknow", "#learnontiktok"]
+        return "economy"
     if "2d" in key or "animation" in key:
-        return ["#animation", "#2danimation", "#animatedstory", "#storytime", "#didyouknow"]
-    if "mystery" in key or "survival" in key or "lost" in key or "horror" in key:
-        return ["#mysterytok", "#unsolved", "#storytime", "#didyouknow", "#learnontiktok"]
+        return "animation"
+    if "survival" in key or "disaster" in key:
+        return "survival"
+    if "folklore" in key or "horror" in key or "legend" in key:
+        return "folklore"
+    if "mystery" in key or "lost" in key or "vanish" in key:
+        return "mystery"
     if "history" in key or "biography" in key or "ancient" in key:
+        return "history"
+    return "general"
+
+
+def english_story_hashtags(category: Any) -> list[str]:
+    lane = english_story_lane(category)
+    if lane == "lawsuit":
+        return ["#storytime", "#lawtok", "#lawsuit", "#didyouknow", "#learnontiktok"]
+    if lane == "court":
+        return ["#storytime", "#lawtok", "#courtcase", "#didyouknow", "#learnontiktok"]
+    if lane == "reddit":
+        return ["#storytime", "#redditstories", "#confession", "#storytelling", "#didyouknow"]
+    if lane == "cat":
+        return ["#catsoftiktok", "#animation", "#storytime", "#cattok", "#didyouknow"]
+    if lane == "economy":
+        return ["#economics", "#moneyhistory", "#storytime", "#didyouknow", "#learnontiktok"]
+    if lane == "animation":
+        return ["#animation", "#2danimation", "#animatedstory", "#storytime", "#didyouknow"]
+    if lane == "survival":
+        return ["#survivaltok", "#truestory", "#storytime", "#didyouknow", "#learnontiktok"]
+    if lane == "folklore":
+        return ["#folklore", "#darkhistory", "#storytime", "#didyouknow", "#learnontiktok"]
+    if lane == "mystery":
+        return ["#mysterytok", "#unsolved", "#storytime", "#didyouknow", "#learnontiktok"]
+    if lane == "history":
         return ["#historytok", "#worldhistory", "#storytime", "#didyouknow", "#learnontiktok"]
     return list(ENGLISH_TIKTOK_HASHTAGS)
+
+
+def effective_item_hashtags(
+    item: dict[str, Any],
+    *,
+    default_hashtags: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
+    account_profile = normalize_account_profile(item.get("account_profile"))
+    audience_language = normalize_audience_language(
+        item.get("audience_language"),
+        account_profile=account_profile,
+    )
+    story_category = str(item.get("story_category") or "").strip()
+    if audience_language == "en" and story_category:
+        source = english_story_hashtags(story_category)
+    else:
+        source = item.get("hashtags") or (
+            hashtags_for_audience_language(audience_language, account_profile=account_profile)
+            if audience_language == "en"
+            else default_hashtags
+        )
+    return normalize_tiktok_hashtags(source)
 
 
 def story_item_identity_keys(item: dict[str, Any]) -> set[str]:
@@ -1539,19 +1591,22 @@ class AutomationController:
             item.get("audience_language"),
             account_profile=account_profile,
         )
-        hashtag_source = item.get("hashtags") or (
-            hashtags_for_audience_language(audience_language, account_profile=account_profile)
-            if audience_language == "en"
-            else self.post_queue.default_hashtags
+        story_category = str(item.get("story_category") or "").strip()
+        queue = getattr(self, "post_queue", None)
+        hashtags = effective_item_hashtags(
+            item,
+            default_hashtags=getattr(queue, "default_hashtags", None),
         )
-        hashtags = normalize_tiktok_hashtags(hashtag_source)
         hook = (
             self._monetization_caption_hook_for_item(item)
             if normalize_content_mode(item.get("content_mode")) == CONTENT_MODE_MONETIZATION
             else self._caption_hook_for_item(item)
         )
-        tag_line = f"{' '.join(hashtags)} {CAPTION_EMOJI}".strip()
-        return f"{hook}\n{tag_line}".strip() if hook else tag_line
+        lines = [hook] if hook else []
+        if story_category and audience_language == "en":
+            lines.append("Follow for tomorrow's 60-second story.")
+        lines.append(f"{' '.join(hashtags)} {CAPTION_EMOJI}".strip())
+        return "\n".join(lines).strip()
 
     def _monetization_caption_hook_for_item(self, item: dict[str, Any]) -> str:
         excerpt = repair_mojibake(str(item.get("segment_excerpt") or "")).strip()
@@ -1566,6 +1621,7 @@ class AutomationController:
             account_profile=item.get("account_profile"),
         ) == "en":
             category_key = str(item.get("story_category") or "").casefold()
+            story_lane = english_story_lane(category_key)
             hooks = [
                 "This story starts normal, then gets seriously strange \U0001F440",
                 "The ending makes the whole thing feel unreal \U0001F633",
@@ -1573,35 +1629,57 @@ class AutomationController:
                 "This sounds fake until you hear what happened next \U0001F633",
                 "The last part is the reason this story still spreads \U0001F440",
             ]
-            if "lawsuit" in category_key:
+            if story_lane == "lawsuit":
                 hooks = [
                     "The headline left out the most important part of this lawsuit \U0001F440",
                     "The real case is much darker than the joke people remember \U0001F633",
                 ]
-            elif "court" in category_key or "legal" in category_key:
+            elif story_lane == "court":
                 hooks = [
                     "One court case changed what millions of people hear today \U0001F440",
                     "This ruling quietly changed everyday life \U0001F633",
                 ]
-            elif "cat" in category_key:
+            elif story_lane == "cat":
                 hooks = [
                     "This tiny cat made one choice that changed the whole town \U0001F440",
                     "The smallest hero in this story noticed what everyone missed \U0001F633",
                 ]
-            elif "economy" in category_key or "market" in category_key:
+            elif story_lane == "economy":
                 hooks = [
                     "People thought the price could only go up. Then everything broke \U0001F440",
                     "This is what happens when excitement becomes an economy \U0001F633",
                 ]
-            elif "2d" in category_key or "animation" in category_key:
+            elif story_lane == "animation":
                 hooks = [
                     "This animated town learned the lesson one second too late \U0001F440",
                     "The simple rule in this story changes everything \U0001F633",
                 ]
-            elif "reddit" in category_key or "forum" in category_key:
+            elif story_lane == "reddit":
                 hooks = [
                     "One small decision turned this confession into a nightmare \U0001F440",
                     "The update is where this story becomes impossible to ignore \U0001F633",
+                ]
+            elif story_lane == "survival":
+                hooks = [
+                    "One survival decision changed everything in seconds \U0001F440",
+                    "The detail that saved them is easy to miss \U0001F633",
+                ]
+            elif story_lane == "folklore":
+                hooks = [
+                    "This old legend becomes stranger with every detail \U0001F633",
+                    "People still argue about what this story was warning them about \U0001F440",
+                ]
+            elif story_lane == "mystery":
+                hooks = [
+                    "The missing detail is what makes this story impossible to ignore \U0001F440",
+                    "Everything looks normal until one thing is gone \U0001F633",
+                    "This mystery still feels like a scene from a movie \U0001F440",
+                ]
+            elif story_lane == "history":
+                hooks = [
+                    "The history lesson leaves out the most important detail \U0001F440",
+                    "One decision changed what happened for years afterward \U0001F633",
+                    "This true story explains how power really moved \U0001F440",
                 ]
             elif any(token in excerpt_key for token in ("oil", "land", "power", "country")):
                 hooks = [
@@ -1996,7 +2074,8 @@ class AutomationController:
         if self._is_english_story_item(item):
             return (
                 f"English story sent to TikTok inbox: {label}.\n"
-                f"{self._caption_paste_message(item)}"
+                f"{self._caption_paste_message(item)}\n"
+                "Posting note: enable TikTok's AI-generated content label."
             )
         return (
             f"{mode_label} video sent to TikTok inbox: {label}. "
@@ -2602,13 +2681,7 @@ class AutomationController:
         return {tag for tag in re.findall(r"#[0-9a-zA-Z_\u0400-\u04FF]+", description)}
 
     def _expected_public_match_hashtags(self, clip: dict[str, Any]) -> list[str]:
-        hashtags = normalize_tiktok_hashtags(
-            clip.get("hashtags")
-            or hashtags_for_audience_language(
-                clip.get("audience_language"),
-                account_profile=clip.get("account_profile"),
-            )
-        )
+        hashtags = effective_item_hashtags(clip)
         return [tag.casefold() for tag in hashtags if tag]
 
     def _public_video_hashtag_hits(self, video: dict[str, Any], clip: dict[str, Any]) -> int:
@@ -2937,6 +3010,14 @@ class AutomationController:
         label = source_entry.get("title") or source_entry.get("source_url") or "source"
         error = str(exc)
         source_url = str(source_entry.get("source_url") or "")
+        if isinstance(exc, StoryDiscoveryUnavailable):
+            message = (
+                f"Fresh English story topic is temporarily unavailable for {label}. "
+                "The source remains active and will retry on the next cycle without creating a duplicate."
+            )
+            self.append_log(f"{message} Reason: {error[:700]}")
+            self.notify(message)
+            return
         if is_youtube_download_timeout(error, source_url):
             if source_id and hasattr(self.sources, "defer_source_failure"):
                 try:

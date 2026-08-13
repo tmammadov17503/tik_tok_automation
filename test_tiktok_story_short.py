@@ -277,6 +277,127 @@ class StoryCaptionLayoutTests(unittest.TestCase):
         self.assertTrue(any("economy" in category for category in categories))
         self.assertTrue(any("2d" in category or "animation" in category for category in categories))
 
+    def test_story_rotation_prioritizes_proven_history_mystery_and_legal_lanes(self) -> None:
+        lanes = [lane.lower() for lane in story.GENRE_ROTATION]
+        history_or_mystery = sum(
+            1
+            for lane in lanes
+            if any(
+                token in lane
+                for token in ("history", "historical", "mystery", "ancient", "biography", "lost", "folklore")
+            )
+        )
+        legal = sum(1 for lane in lanes if "lawsuit" in lane or "court" in lane)
+        experiments = sum(
+            1
+            for lane in lanes
+            if any(token in lane for token in ("cat", "2d", "economy", "reddit"))
+        )
+
+        self.assertEqual(len(lanes), 24)
+        self.assertEqual(len(story.FALLBACK_TOPIC_SLUGS), len(lanes))
+        self.assertEqual(len(set(story.FALLBACK_TOPIC_SLUGS)), len(lanes))
+        self.assertGreaterEqual(history_or_mystery, 12)
+        self.assertGreaterEqual(legal, 5)
+        self.assertLessEqual(experiments, 5)
+
+    def test_ai_story_category_cannot_override_requested_rotation_lane(self) -> None:
+        payload = {
+            "slug": "the-price-that-broke-a-city",
+            "title": "The Price That Broke A City",
+            "short_title": "WHEN PRICES BROKE",
+            "hook": "A price doubled until the whole city stopped.",
+            "category": "cat animation",
+            "beats": [
+                {
+                    "label": f"Beat {index}",
+                    "narration": f"Economy narration for beat {index}.",
+                    "onscreen_text": f"PRICE {index}",
+                }
+                for index in range(1, 9)
+            ],
+        }
+
+        normalized = story._normalize_ai_story(
+            payload,
+            source_entry={"source_url": "story://autonomous-english-reels/test-r00"},
+            sequence_index=1,
+            genre="world economy story",
+        )
+
+        self.assertEqual(normalized["category"], "world economy story")
+
+    def test_complete_fallback_cycle_stays_unique_and_in_requested_lanes(self) -> None:
+        source = {"source_url": "story://autonomous-english-reels/fallback-r00"}
+        seen: set[str] = set()
+        selected: list[dict[str, object]] = []
+
+        with patch.object(story, "_ai_story_discovery_enabled", return_value=False):
+            for sequence_index in range(1, len(story.GENRE_ROTATION) + 1):
+                candidate, selection_index = story._select_unseen_story(
+                    source,
+                    sequence_index=sequence_index,
+                    excluded_story_keys=seen,
+                )
+                self.assertEqual(selection_index, sequence_index)
+                self.assertEqual(candidate["category"], story.GENRE_ROTATION[sequence_index - 1])
+                self.assertFalse(story.story_identity_keys(candidate).intersection(seen))
+                seen.update(story.story_identity_keys(candidate))
+                selected.append(candidate)
+
+        self.assertEqual(len(selected), len(story.GENRE_ROTATION))
+
+    def test_story_follow_cta_is_spoken_once(self) -> None:
+        source_story = {
+            "beats": [
+                {"narration": "This is the opening."},
+                {"narration": "This is the ending."},
+            ]
+        }
+
+        enriched = story._with_opening_hook(source_story, sequence_index=1)
+        enriched_again = story._with_opening_hook(enriched, sequence_index=1)
+        narration = story.story_narration_text(enriched_again)
+
+        self.assertEqual(narration.count(story.FOLLOW_CTA), 1)
+        self.assertTrue(narration.endswith(story.FOLLOW_CTA))
+
+    def test_story_follow_cta_recognizes_legacy_and_punctuation_variants(self) -> None:
+        for existing_cta in (
+            "Follow for tomorrow's true 60-second story.",
+            "Follow for tomorrow's 60-second story!",
+        ):
+            source_story = {"beats": [{"narration": f"The ending. {existing_cta}"}]}
+            enriched = story._with_opening_hook(source_story, sequence_index=1)
+            narration = story.story_narration_text(enriched)
+
+            self.assertEqual(narration.casefold().count("follow for tomorrow"), 1)
+
+    def test_nonpolitical_library_topics_use_neutral_story_beats(self) -> None:
+        topic = next(item for item in story.TOPIC_LIBRARY if item["slug"] == "antikythera-mechanism")
+        narration = story.story_narration_text({"beats": story._beats_for_topic(topic)}).casefold()
+
+        self.assertNotIn("supporters", narration)
+        self.assertNotIn("one leader", narration)
+        self.assertNotIn("the room around him", narration)
+        self.assertIn("interlocking gears", narration)
+
+    def test_exhausted_second_fallback_cycle_waits_instead_of_repeating(self) -> None:
+        source = {"source_url": "story://autonomous-english-reels/fallback-r24"}
+        seen = {
+            identity
+            for index in range(1, len(story.GENRE_ROTATION) + 1)
+            for identity in story.story_identity_keys(
+                story._build_library_story({}, sequence_index=index)
+            )
+        }
+
+        with (
+            patch.object(story, "_ai_story_discovery_enabled", return_value=False),
+            self.assertRaises(story.StoryDiscoveryUnavailable),
+        ):
+            story._select_unseen_story(source, sequence_index=1, excluded_story_keys=seen)
+
     def test_story_batch_rotation_offset_continues_across_batches(self) -> None:
         first_batch = {
             "source_url": "story://autonomous-english-reels/20260716T120000Z-r00",
@@ -310,9 +431,14 @@ class StoryCaptionLayoutTests(unittest.TestCase):
         }
         seen = story.story_identity_keys(repeated)
 
+        fallback_topics = [
+            {"slug": "dyatlov-pass-1959"},
+            {"slug": "flannan-isles-1900"},
+        ]
         with (
             patch.object(story, "_ai_story_discovery_enabled", return_value=False),
-            patch.object(story, "_build_library_story", side_effect=[repeated, unseen]) as mocked,
+            patch.object(story, "_fallback_candidates", return_value=fallback_topics),
+            patch.object(story, "_library_story_from_topic", side_effect=[repeated, unseen]) as mocked,
         ):
             selected, selection_index = story._select_unseen_story(
                 {"source_url": "story://autonomous-english-reels/test-r00"},
@@ -321,7 +447,7 @@ class StoryCaptionLayoutTests(unittest.TestCase):
             )
 
         self.assertEqual(selected["slug"], "flannan-isles-1900")
-        self.assertEqual(selection_index, 3)
+        self.assertEqual(selection_index, 2)
         self.assertEqual(mocked.call_count, 2)
 
     def test_ai_story_discovery_defaults_on_when_openai_is_configured(self) -> None:
