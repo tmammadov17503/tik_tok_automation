@@ -18,6 +18,8 @@ from tiktok_story_short import (
     StoryDiscoveryUnavailable,
     english_story_mode_enabled,
     generate_tiktok_story_clip,
+    original_story_mode_enabled,
+    russian_story_mode_enabled,
     story_identity_keys,
     story_rotation_size,
 )
@@ -102,6 +104,8 @@ ENGLISH_TIKTOK_HASHTAGS = [
 ]
 AUTONOMOUS_ENGLISH_SOURCE_URL = "story://autonomous-english-reels"
 AUTONOMOUS_ENGLISH_SOURCE_TITLE = "Autonomous English Story Batch"
+AUTONOMOUS_RUSSIAN_SOURCE_URL = "story://autonomous-russian-originals"
+AUTONOMOUS_RUSSIAN_SOURCE_TITLE = "Original Russian Story Batch"
 GENERIC_PUBLIC_MATCH_HASHTAGS = {
     "#fyp",
     "#relatable",
@@ -233,6 +237,8 @@ def effective_item_hashtags(
     story_category = str(item.get("story_category") or "").strip()
     if audience_language == "en" and story_category:
         source = english_story_hashtags(story_category)
+    elif audience_language == "ru" and story_category:
+        source = CANONICAL_TIKTOK_HASHTAGS
     else:
         source = item.get("hashtags") or (
             hashtags_for_audience_language(audience_language, account_profile=account_profile)
@@ -256,8 +262,9 @@ def clip_display_name(item: dict[str, Any]) -> str:
     story_title = repair_mojibake(str(item.get("story_title") or "")).strip()
     if story_title:
         return story_title
-    is_story = bool(str(item.get("story_category") or "").strip()) or str(item.get("source_url") or "").startswith(
-        AUTONOMOUS_ENGLISH_SOURCE_URL
+    source_url = str(item.get("source_url") or "")
+    is_story = bool(str(item.get("story_category") or "").strip()) or source_url.startswith(
+        (AUTONOMOUS_ENGLISH_SOURCE_URL, AUTONOMOUS_RUSSIAN_SOURCE_URL)
     )
     if is_story:
         excerpt = repair_mojibake(str(item.get("segment_excerpt") or "")).strip()
@@ -1597,14 +1604,23 @@ class AutomationController:
             item,
             default_hashtags=getattr(queue, "default_hashtags", None),
         )
-        hook = (
-            self._monetization_caption_hook_for_item(item)
-            if normalize_content_mode(item.get("content_mode")) == CONTENT_MODE_MONETIZATION
-            else self._caption_hook_for_item(item)
-        )
+        if self._is_russian_story_item(item):
+            excerpt = repair_mojibake(str(item.get("segment_excerpt") or "")).strip()
+            hook = re.split(r"(?<=[.!?])\s+", excerpt, maxsplit=1)[0].strip()
+            if len(hook) > 115:
+                hook = hook[:112].rstrip() + "..."
+            hook = f"{hook} 👀" if hook else "История, о которой почти никто не знает 👀"
+        else:
+            hook = (
+                self._monetization_caption_hook_for_item(item)
+                if normalize_content_mode(item.get("content_mode")) == CONTENT_MODE_MONETIZATION
+                else self._caption_hook_for_item(item)
+            )
         lines = [hook] if hook else []
         if story_category and audience_language == "en":
             lines.append("Follow for tomorrow's 60-second story.")
+        elif story_category and audience_language == "ru":
+            lines.append("Подпишись, завтра будет новая история.")
         lines.append(f"{' '.join(hashtags)} {CAPTION_EMOJI}".strip())
         return "\n".join(lines).strip()
 
@@ -2011,8 +2027,8 @@ class AutomationController:
         source_entry = progress.get("source")
         if source_entry is None:
             return "Source complete."
-        if self._is_english_story_source(source_entry):
-            return self._english_story_source_line(source_entry)
+        if self._is_original_story_source(source_entry):
+            return self._original_story_source_line(source_entry)
         if source_entry.get("status") in {"failed", "skipped"}:
             error = str(source_entry.get("last_error") or "source failed").strip()
             if len(error) > 160:
@@ -2048,6 +2064,15 @@ class AutomationController:
             or english_story_mode_enabled(source_entry)
         )
 
+    def _is_russian_story_source(self, source_entry: dict[str, Any] | None) -> bool:
+        if not source_entry:
+            return False
+        source_url = str(source_entry.get("source_url") or "")
+        return source_url.startswith(AUTONOMOUS_RUSSIAN_SOURCE_URL) or russian_story_mode_enabled(source_entry)
+
+    def _is_original_story_source(self, source_entry: dict[str, Any] | None) -> bool:
+        return self._is_english_story_source(source_entry) or self._is_russian_story_source(source_entry)
+
     def _is_english_story_item(self, item: dict[str, Any]) -> bool:
         source_url = str(item.get("source_url") or "")
         source_title = str(item.get("source_title") or "")
@@ -2061,6 +2086,25 @@ class AutomationController:
             )
         )
 
+    def _is_russian_story_item(self, item: dict[str, Any]) -> bool:
+        source_url = str(item.get("source_url") or "")
+        source_title = str(item.get("source_title") or "")
+        return (
+            source_url.startswith(AUTONOMOUS_RUSSIAN_SOURCE_URL)
+            or source_title.startswith(AUTONOMOUS_RUSSIAN_SOURCE_TITLE)
+            or (
+                bool(str(item.get("story_category") or "").strip())
+                and normalize_account_profile(item.get("account_profile")) == ACCOUNT_PROFILE_MAIN_RU
+                and normalize_audience_language(
+                    item.get("audience_language"), account_profile=item.get("account_profile")
+                )
+                == "ru"
+            )
+        )
+
+    def _is_original_story_item(self, item: dict[str, Any]) -> bool:
+        return self._is_english_story_item(item) or self._is_russian_story_item(item)
+
     def _english_story_source_line(self, source_entry: dict[str, Any]) -> str:
         status = str(source_entry.get("status") or "").strip().lower()
         if status in {"failed", "skipped"}:
@@ -2069,11 +2113,27 @@ class AutomationController:
             return "English story batch is paused until the account is ready."
         return "English story batch is active. New story videos will be sent to the TikTok inbox."
 
+    def _original_story_source_line(self, source_entry: dict[str, Any]) -> str:
+        if self._is_english_story_source(source_entry):
+            return self._english_story_source_line(source_entry)
+        status = str(source_entry.get("status") or "").strip().lower()
+        if status in {"failed", "skipped"}:
+            return "Russian original-story batch skipped after a generation issue; the next cycle will start fresh."
+        if status == "parked":
+            return "Russian original-story batch is paused until the account is ready."
+        return "Russian original-story batch is active. New original videos will be sent to the TikTok inbox."
+
     def _upload_delivery_message(self, item: dict[str, Any], mode_label: str) -> str:
         label = clip_display_name(item)
         if self._is_english_story_item(item):
             return (
                 f"English story sent to TikTok inbox: {label}.\n"
+                f"{self._caption_paste_message(item)}\n"
+                "Posting note: enable TikTok's AI-generated content label."
+            )
+        if self._is_russian_story_item(item):
+            return (
+                f"Russian original story sent to TikTok inbox: {label}.\n"
                 f"{self._caption_paste_message(item)}\n"
                 "Posting note: enable TikTok's AI-generated content label."
             )
@@ -2230,9 +2290,10 @@ class AutomationController:
         self.append_log(
             f"Queued {len(clip_paths)} {mode_label.lower()} clip(s) from {source_entry.get('title') or source_url} for TikTok upload."
         )
-        if self._is_english_story_source(source_entry):
+        if self._is_original_story_source(source_entry):
+            language_label = "English" if self._is_english_story_source(source_entry) else "Russian original"
             self.notify(
-                f"Created English story: {clip_display_name(queued_items[0])} ({caption_note}). "
+                f"Created {language_label} story: {clip_display_name(queued_items[0])} ({caption_note}). "
                 "Uploading it to the TikTok inbox now."
             )
         else:
@@ -2706,7 +2767,7 @@ class AutomationController:
             if normalize_account_profile(source.get("account_profile")) == active_profile
         ]
         if not sources:
-            created = self._maybe_create_autonomous_english_source()
+            created = self._maybe_create_autonomous_source()
             if created is not None:
                 sources = [created]
         return sorted(
@@ -2724,6 +2785,17 @@ class AutomationController:
         value = os.getenv("TIKTOK_AUTONOMOUS_ENGLISH_STORIES", "true").strip().lower()
         return value not in {"0", "false", "no", "off"} and self._active_account_profile() == ACCOUNT_PROFILE_FUTURE_EN
 
+    def _autonomous_russian_enabled(self) -> bool:
+        value = os.getenv("TIKTOK_AUTONOMOUS_RUSSIAN_STORIES", "false").strip().lower()
+        return value not in {"0", "false", "no", "off"} and self._active_account_profile() == ACCOUNT_PROFILE_MAIN_RU
+
+    def _maybe_create_autonomous_source(self) -> dict[str, Any] | None:
+        if self._active_account_profile() == ACCOUNT_PROFILE_FUTURE_EN:
+            return self._maybe_create_autonomous_english_source()
+        if self._active_account_profile() == ACCOUNT_PROFILE_MAIN_RU:
+            return self._maybe_create_autonomous_russian_source()
+        return None
+
     def _english_has_unfinished_queue_items(self) -> bool:
         return any(
             normalize_account_profile(item.get("account_profile")) == ACCOUNT_PROFILE_FUTURE_EN
@@ -2732,17 +2804,25 @@ class AutomationController:
         )
 
     def _seen_english_story_keys(self) -> set[str]:
+        return self._seen_story_keys("en")
+
+    def _seen_story_keys(self, language: str) -> set[str]:
+        predicate = self._is_russian_story_item if language == "ru" else self._is_english_story_item
         return {
             identity
             for item in self.post_queue.list_items()
-            if self._is_english_story_item(item)
+            if predicate(item)
             for identity in story_item_identity_keys(item)
         }
 
     def _unique_english_story_count(self) -> int:
+        return self._unique_story_count("en")
+
+    def _unique_story_count(self, language: str) -> int:
         identities: set[str] = set()
+        predicate = self._is_russian_story_item if language == "ru" else self._is_english_story_item
         for item in self.post_queue.list_items():
-            if not self._is_english_story_item(item):
+            if not predicate(item):
                 continue
             keys = story_item_identity_keys(item)
             primary = next((key for key in sorted(keys) if key.startswith("hook:")), "")
@@ -2753,6 +2833,55 @@ class AutomationController:
             if primary:
                 identities.add(primary)
         return len(identities)
+
+    def _maybe_create_autonomous_russian_source(self) -> dict[str, Any] | None:
+        if not self._autonomous_russian_enabled() or not hasattr(self.sources, "add_source"):
+            return None
+
+        planned_clips = env_int("TIKTOK_RU_ORIGINAL_BATCH_SIZE", 3, minimum=1, maximum=8)
+        batch_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        source_template = {
+            "source_url": AUTONOMOUS_RUSSIAN_SOURCE_URL,
+            "account_profile": ACCOUNT_PROFILE_MAIN_RU,
+            "audience_language": "ru",
+        }
+        rotation_offset = self._unique_story_count("ru") % max(1, story_rotation_size(source_template))
+        batch_url = f"{AUTONOMOUS_RUSSIAN_SOURCE_URL}/{batch_stamp}-r{rotation_offset:02d}"
+        batch_title = f"{AUTONOMOUS_RUSSIAN_SOURCE_TITLE} {batch_stamp}"
+        try:
+            self.sources.add_source(
+                {
+                    "source_url": batch_url,
+                    "title": batch_title,
+                    "planned_clips": planned_clips,
+                    "content_mode": CONTENT_MODE_MONETIZATION,
+                    "account_profile": ACCOUNT_PROFILE_MAIN_RU,
+                    "audience_language": "ru",
+                }
+            )
+        except Exception as exc:
+            self.append_log(f"Could not create autonomous Russian original-story batch: {exc}")
+            return None
+
+        created = next(
+            (
+                source
+                for source in self.sources.list_sources()
+                if str(source.get("source_url") or "").strip() == batch_url
+                and normalize_account_profile(source.get("account_profile")) == ACCOUNT_PROFILE_MAIN_RU
+                and normalize_content_mode(source.get("content_mode")) == CONTENT_MODE_MONETIZATION
+            ),
+            None,
+        )
+        if created is None:
+            return None
+
+        self.append_log("Created autonomous Russian original-story batch after the pasted-link queue became empty.")
+        self.notify(
+            f"The Russian pasted-link queue is complete. I created a {planned_clips}-video original-story batch for "
+            "follower growth and future monetization; videos will arrive one at a time."
+        )
+        return created
 
     def _maybe_create_autonomous_english_source(self) -> dict[str, Any] | None:
         if not self._autonomous_english_enabled():
@@ -2913,23 +3042,25 @@ class AutomationController:
             account_profile=account_profile,
         )
 
-        if english_story_mode_enabled(source_entry):
+        if original_story_mode_enabled(source_entry):
+            story_language_code = "ru" if russian_story_mode_enabled(source_entry) else "en"
+            language_label = "Russian original" if story_language_code == "ru" else "English"
             remote_pending_count = self.post_queue.remote_pending_count()
             if remote_pending_count >= self.max_pending_shares:
                 self.append_log(
-                    f"English story generation waiting because TikTok inbox cap is full "
+                    f"{language_label} story generation waiting because TikTok inbox cap is full "
                     f"({remote_pending_count}/{self.max_pending_shares})."
                 )
                 return
             sequence_index = posted + pending_count + 1
             job = AutomationJobProxy(self, source_entry)
-            self.notify("Generating a new English story video for the TikTok inbox.")
+            self.notify(f"Generating a new {language_label.lower()} story video for the TikTok inbox.")
             try:
                 story_result = generate_tiktok_story_clip(
                     self.root,
                     source_entry,
                     sequence_index=sequence_index,
-                    excluded_story_keys=self._seen_english_story_keys(),
+                    excluded_story_keys=self._seen_story_keys(story_language_code),
                     logger=job.log,
                 )
             except Exception as exc:
@@ -3052,7 +3183,7 @@ class AutomationController:
             minimum=1,
             maximum=5,
         )
-        if english_story_mode_enabled(source_entry):
+        if original_story_mode_enabled(source_entry):
             max_failures = max(max_failures, 3)
         updated = None
         if source_id and hasattr(self.sources, "mark_source_failure"):
@@ -3199,6 +3330,8 @@ class AutomationController:
             label = clip_display_name(item)
             if self._is_english_story_item(item):
                 self.notify(f"Posted confirmed for English story: {label}.")
+            elif self._is_russian_story_item(item):
+                self.notify(f"Posted confirmed for Russian original story: {label}.")
             else:
                 self.notify(f"Posted confirmed for {label}. {self.source_progress_line(source_id)}")
 

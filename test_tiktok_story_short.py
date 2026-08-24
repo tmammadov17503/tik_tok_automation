@@ -362,6 +362,67 @@ class StoryCaptionLayoutTests(unittest.TestCase):
         self.assertEqual(narration.count(story.FOLLOW_CTA), 1)
         self.assertTrue(narration.endswith(story.FOLLOW_CTA))
 
+    def test_russian_story_mode_only_accepts_autonomous_russian_sources(self) -> None:
+        autonomous_source = {
+            "source_url": "story://autonomous-russian-originals/test-r00",
+            "content_mode": "monetization",
+            "account_profile": "main_ru",
+            "audience_language": "ru",
+        }
+        pasted_youtube_source = dict(
+            autonomous_source,
+            source_url="https://youtu.be/example",
+        )
+
+        with patch.dict(os.environ, {"TIKTOK_RU_STORY_MODE": "true"}, clear=False):
+            self.assertTrue(story.original_story_mode_enabled(autonomous_source))
+            self.assertFalse(story.original_story_mode_enabled(pasted_youtube_source))
+
+    def test_russian_story_prompt_requires_original_natural_russian(self) -> None:
+        prompt = story._ai_story_prompt(
+            {
+                "title": "Original Russian Story Batch",
+                "source_url": "story://autonomous-russian-originals/test-r00",
+                "account_profile": "main_ru",
+                "audience_language": "ru",
+            },
+            sequence_index=1,
+            genre="cinema history",
+        )
+
+        self.assertIn("natural Russian", prompt)
+        self.assertIn("Do not summarize copyrighted films", prompt)
+        self.assertIn("one fresh vertical short story", prompt)
+
+    def test_russian_story_follow_cta_and_hook_are_spoken_once(self) -> None:
+        source_story = {
+            "audience_language": "ru",
+            "beats": [
+                {"narration": "Эта история началась в старом кинотеатре."},
+                {"narration": "Правду нашли только много лет спустя."},
+            ],
+        }
+
+        enriched = story._with_opening_hook(source_story, sequence_index=1)
+        enriched_again = story._with_opening_hook(enriched, sequence_index=1)
+        narration = story.story_narration_text(enriched_again)
+
+        self.assertEqual(narration.count(story.RUSSIAN_FOLLOW_CTA), 1)
+        self.assertTrue(narration.endswith(story.RUSSIAN_FOLLOW_CTA))
+        self.assertTrue(story._starts_with_curiosity_hook(narration, language="ru"))
+
+    def test_story_identity_preserves_cyrillic_titles(self) -> None:
+        keys = story.story_identity_keys(
+            {
+                "slug": "old-cinema-secret",
+                "title": "Тайна старого кинотеатра",
+                "hook": "Эту пленку никто не должен был увидеть",
+            }
+        )
+
+        self.assertIn("title:тайна старого кинотеатра", keys)
+        self.assertIn("hook:эту пленку никто не должен был увидеть", keys)
+
     def test_story_follow_cta_recognizes_legacy_and_punctuation_variants(self) -> None:
         for existing_cta in (
             "Follow for tomorrow's true 60-second story.",
@@ -515,6 +576,10 @@ class StoryCaptionLayoutTests(unittest.TestCase):
         self.assertEqual(story._story_badge({"category": "lawsuit story"}), "LAWSUIT STORY")
         self.assertEqual(story._story_badge({"category": "cat animation"}), "CAT ANIMATION")
         self.assertEqual(story._story_badge({"category": "world economy story"}), "ECONOMY STORY")
+
+    def test_story_brand_accepts_systemd_safe_underscores(self) -> None:
+        with patch.dict(os.environ, {"TIKTOK_STORY_BRAND": "FILM_BOX_OFFICIAL"}, clear=False):
+            self.assertEqual(story._story_brand(), "FILM BOX OFFICIAL")
 
     def test_elevenlabs_budget_uses_shared_weekly_credit_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -93,6 +93,20 @@ GENRE_ROTATION = [
     "cat animation",
     "2d animation moral story",
 ]
+RUSSIAN_GENRE_ROTATION = [
+    "cinema history",
+    "historical mystery",
+    "film craft story",
+    "court case",
+    "strange true history",
+    "survival story",
+    "dark biography",
+    "world economy story",
+    "folklore legend",
+    "original 2d animation story",
+    "forgotten invention",
+    "psychology story",
+]
 FALLBACK_TOPIC_SLUGS = [
     "mary-celeste-1872",
     "hot-coffee-lawsuit-1994",
@@ -122,6 +136,7 @@ FALLBACK_TOPIC_SLUGS = [
 STORY_ROTATION_SUFFIX = re.compile(r"-r(?P<offset>\d+)$", re.IGNORECASE)
 FOLLOW_CTA = "Follow for tomorrow's 60-second story."
 LEGACY_FOLLOW_CTA = "Follow for tomorrow's true 60-second story."
+RUSSIAN_FOLLOW_CTA = "Подпишись, завтра будет новая история."
 HOOK_OPENERS = [
     "Did you know this actually happened?",
     "Have you ever heard this story?",
@@ -129,6 +144,14 @@ HOOK_OPENERS = [
     "This sounds fake, but it happened.",
     "You probably never heard this part.",
 ]
+RUSSIAN_HOOK_OPENERS = [
+    "Ты знал, что это действительно произошло?",
+    "Ты когда-нибудь слышал эту историю?",
+    "Что, если я скажу, что это правда?",
+    "Звучит как выдумка, но это случилось.",
+    "Об этой детали почти никто не знает.",
+]
+AUTONOMOUS_RUSSIAN_SOURCE_URL = "story://autonomous-russian-originals"
 
 
 class StoryDiscoveryUnavailable(RuntimeError):
@@ -850,6 +873,41 @@ def english_story_mode_enabled(source_entry: dict[str, Any]) -> bool:
     return profile in {"future_en", "english", "en"} and language.startswith("en") and mode == "monetization"
 
 
+def russian_story_mode_enabled(source_entry: dict[str, Any]) -> bool:
+    if os.getenv("TIKTOK_RU_STORY_MODE", "true").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    profile = str(source_entry.get("account_profile") or "").strip().lower()
+    mode = str(source_entry.get("content_mode") or "").strip().lower()
+    language = str(source_entry.get("audience_language") or "").strip().lower()
+    source_url = str(source_entry.get("source_url") or "").strip().lower()
+    return (
+        profile in {"main_ru", "russian", "ru"}
+        and language.startswith("ru")
+        and mode == "monetization"
+        and source_url.startswith(AUTONOMOUS_RUSSIAN_SOURCE_URL)
+    )
+
+
+def original_story_mode_enabled(source_entry: dict[str, Any]) -> bool:
+    return english_story_mode_enabled(source_entry) or russian_story_mode_enabled(source_entry)
+
+
+def story_language(value: dict[str, Any] | None) -> str:
+    source = value or {}
+    language = str(source.get("audience_language") or "").strip().lower()
+    profile = str(source.get("account_profile") or "").strip().lower()
+    source_url = str(source.get("source_url") or "").strip().lower()
+    if language.startswith("ru") or profile in {"main_ru", "russian", "ru"} or source_url.startswith(
+        AUTONOMOUS_RUSSIAN_SOURCE_URL
+    ):
+        return "ru"
+    return "en"
+
+
+def _genre_rotation(source_entry: dict[str, Any] | None) -> list[str]:
+    return RUSSIAN_GENRE_ROTATION if story_language(source_entry) == "ru" else GENRE_ROTATION
+
+
 def generate_tiktok_story_clip(
     root: Path,
     source_entry: dict[str, Any],
@@ -859,6 +917,8 @@ def generate_tiktok_story_clip(
     logger: Callable[[str], None] | None = None,
 ) -> StoryClipResult:
     log = logger or (lambda message: None)
+    language = story_language(source_entry)
+    language_label = "Russian" if language == "ru" else "English"
     story, selection_index = _select_unseen_story(
         source_entry,
         sequence_index=sequence_index,
@@ -884,7 +944,7 @@ def generate_tiktok_story_clip(
     script_path.write_text(_script_text(story), encoding="utf-8")
 
     narration = story_narration_text(story)
-    log(f"Generating original English story voiceover: {story['title']}.")
+    log(f"Generating original {language_label} story voiceover: {story['title']}.")
     voiceover_meta = _generate_story_voiceover(narration, voiceover_path, logger=log)
     alignment_meta = _generate_story_word_alignment(
         narration,
@@ -927,7 +987,7 @@ def generate_tiktok_story_clip(
             "story_title": story.get("title") or "",
             "story_short_title": story.get("short_title") or "",
             "story_slug": story.get("slug") or "",
-            "reason": "Original English story reel generated for the autonomous story account.",
+            "reason": f"Original {language_label} story reel generated for the autonomous story account.",
         }
     ]
     segments_path.write_text(json.dumps(segments, indent=2), encoding="utf-8")
@@ -943,6 +1003,7 @@ def generate_tiktok_story_clip(
         "topic_slug": story["slug"],
         "story_source": story.get("story_source") or "library",
         "category": story.get("category") or "",
+        "audience_language": language,
         "caption_style": "forced_alignment_ass_centered_red_active_word",
         "caption_alignment": str(alignment_path),
         "captions": str(captions_path),
@@ -999,8 +1060,8 @@ def build_story(
 def story_identity_keys(story: dict[str, Any]) -> set[str]:
     keys: set[str] = set()
     slug = re.sub(r"[^a-z0-9]+", "-", str(story.get("slug") or "").casefold()).strip("-")
-    hook = re.sub(r"[^a-z0-9]+", " ", str(story.get("hook") or "").casefold()).strip()
-    title = re.sub(r"[^a-z0-9]+", " ", str(story.get("title") or "").casefold()).strip()
+    hook = re.sub(r"[\W_]+", " ", str(story.get("hook") or "").casefold(), flags=re.UNICODE).strip()
+    title = re.sub(r"[\W_]+", " ", str(story.get("title") or "").casefold(), flags=re.UNICODE).strip()
     if slug:
         keys.add(f"slug:{slug}")
     if hook:
@@ -1023,7 +1084,7 @@ def _select_unseen_story(
     requested_rotation_index = _story_rotation_index(source_entry, sequence_index=max(1, sequence_index))
     if _ai_story_discovery_enabled():
         for offset in range(MAX_AI_STORY_CANDIDATES):
-            rotation_index = requested_rotation_index + (offset * story_rotation_size())
+            rotation_index = requested_rotation_index + (offset * story_rotation_size(source_entry))
             ai_story = _build_ai_story(
                 source_entry,
                 sequence_index=rotation_index,
@@ -1039,7 +1100,12 @@ def _select_unseen_story(
                 return story, requested_rotation_index
             log(f"Skipping repeated AI story topic: {story.get('title') or story.get('slug') or rotation_index}.")
 
-    lane = GENRE_ROTATION[(requested_rotation_index - 1) % len(GENRE_ROTATION)]
+    rotation = _genre_rotation(source_entry)
+    lane = rotation[(requested_rotation_index - 1) % len(rotation)]
+    if story_language(source_entry) == "ru":
+        raise StoryDiscoveryUnavailable(
+            f"A fresh Russian original story is temporarily unavailable for the {lane} lane; AI discovery will retry."
+        )
     candidates = _fallback_candidates(requested_rotation_index, lane)
     if not candidates:
         raise StoryDiscoveryUnavailable(f"English story fallback has no topic for requested lane: {lane}.")
@@ -1059,8 +1125,8 @@ def _select_unseen_story(
     )
 
 
-def story_rotation_size() -> int:
-    return len(GENRE_ROTATION)
+def story_rotation_size(source_entry: dict[str, Any] | None = None) -> int:
+    return len(_genre_rotation(source_entry))
 
 
 def _story_rotation_index(source_entry: dict[str, Any], *, sequence_index: int) -> int:
@@ -1071,6 +1137,8 @@ def _story_rotation_index(source_entry: dict[str, Any], *, sequence_index: int) 
 
 
 def _build_library_story(source_entry: dict[str, Any], *, sequence_index: int) -> dict[str, Any]:
+    if story_language(source_entry) == "ru":
+        raise StoryDiscoveryUnavailable("Russian original stories require fresh AI discovery.")
     lane_index = max(1, sequence_index) - 1
     lane = GENRE_ROTATION[lane_index % len(GENRE_ROTATION)]
     candidates = _fallback_candidates(max(1, sequence_index), lane)
@@ -1155,7 +1223,8 @@ def _build_ai_story(
     if not _ai_story_discovery_enabled():
         return None
 
-    genre = GENRE_ROTATION[(max(1, sequence_index) - 1) % len(GENRE_ROTATION)]
+    rotation = _genre_rotation(source_entry)
+    genre = rotation[(max(1, sequence_index) - 1) % len(rotation)]
     try:
         payload = _request_ai_story_payload(
             source_entry,
@@ -1165,7 +1234,8 @@ def _build_ai_story(
         )
         story = _normalize_ai_story(payload, source_entry=source_entry, sequence_index=sequence_index, genre=genre)
     except Exception as exc:
-        logger(f"AI story discovery failed, using fallback library: {exc}")
+        fallback_note = "waiting for a fresh Russian topic" if story_language(source_entry) == "ru" else "using fallback library"
+        logger(f"AI story discovery failed, {fallback_note}: {exc}")
         return None
 
     logger(f"AI picked {story['category']}: {story['title']}.")
@@ -1196,18 +1266,29 @@ def _request_ai_story_payload(
         genre=genre,
         excluded_story_keys=excluded_story_keys,
     )
+    language = story_language(source_entry)
+    if language == "ru":
+        system_prompt = (
+            "You create short, original, monetization-safe Russian TikTok story scripts. Return strict JSON only. "
+            "Write narration, title, short_title, hook, labels, and onscreen_text in natural Russian. Write slug, visual, "
+            "palette, and motion in English for the image pipeline. Use documented public history or entirely original "
+            "fiction. Avoid copyrighted plots and characters, copied social posts, explicit gore, current-news claims, "
+            "unsupported accusations, and invented events presented as real."
+        )
+    else:
+        system_prompt = (
+            "You create short, original, monetization-safe English TikTok story scripts. "
+            "Return strict JSON only. Use well-known public-domain history, documented mysteries, public legal cases, "
+            "world economy explainers, original animated fables, original cat animation stories, or original "
+            "forum-confession style stories. Avoid copyrighted fiction, copied Reddit posts, explicit gore, "
+            "current-news claims, unsupported accusations, and invented events presented as real."
+        )
     completion = client.chat.completions.create(
         model=model,
         messages=[
             {
                 "role": "system",
-                "content": (
-                    "You create short, original, monetization-safe English TikTok story scripts. "
-                    "Return strict JSON only. Use well-known public-domain history, documented mysteries, public legal cases, "
-                    "world economy explainers, original animated fables, original cat animation stories, or original "
-                    "forum-confession style stories. Avoid copyrighted fiction, copied Reddit posts, explicit gore, "
-                    "current-news claims, unsupported accusations, and invented events presented as real."
-                ),
+                "content": system_prompt,
             },
             {"role": "user", "content": prompt},
         ],
@@ -1227,6 +1308,7 @@ def _ai_story_prompt(
 ) -> str:
     source_title = str(source_entry.get("title") or "").strip()
     source_hint = f"Current batch title: {source_title}." if source_title else "No user source was provided."
+    language = story_language(source_entry)
     previous_topics = ", ".join(topic["title"] for topic in TOPIC_LIBRARY[:8])
     excluded_topics = _excluded_story_prompt_values(excluded_story_keys)
     exclusion_note = (
@@ -1234,6 +1316,28 @@ def _ai_story_prompt(
         if excluded_topics
         else ""
     )
+    if language == "ru":
+        return (
+            "Create one fresh vertical short story for Russian TikTok growth and original-content monetization.\n"
+            f"Slot: {sequence_index}. Genre lane: {genre}. {source_hint}\n"
+            "Write title, short_title, hook, every beat label, narration, and onscreen_text in natural Russian. "
+            "Write slug, visual, palette, and motion in English.\n"
+            "Prioritize cinema history and craft, real historical mysteries, documented court cases, strange true history, "
+            "survival, biographies, psychology, economy, folklore framed as legend, and original 2D stories.\n"
+            "Do not summarize copyrighted films, TV episodes, or franchise plots, and do not use copyrighted characters.\n"
+            f"{exclusion_note}"
+            "Requirements:\n"
+            "- 8 beats exactly; each narration is 16 to 27 spoken Russian words.\n"
+            "- Total narration should run 60 to 75 seconds and end with a satisfying reveal or takeaway.\n"
+            "- Begin with a natural Russian curiosity hook such as: Ты знал...? / Ты когда-нибудь слышал...? / Что, если я скажу...?\n"
+            "- For factual stories, use only widely documented public facts; never invent dates, rulings, causes, or people.\n"
+            "- For fiction or folklore, label it clearly as an original story, legend, rumor, or alleged event.\n"
+            "- No graphic gore, current crime allegations, political persuasion, or reused social-media posts.\n"
+            "- Onscreen text is 2 to 5 short Russian words.\n"
+            "- Every visual is a concrete English comic-panel prompt with setting, characters, action, props, and mood.\n"
+            "Return JSON with keys: slug, title, short_title, hook, category, beats. "
+            "beats is an array of objects with label, narration, onscreen_text, visual, palette, motion."
+        )
     return (
         f"Create one fresh vertical short story for English TikTok monetization.\n"
         f"Slot: {sequence_index}. Genre lane: {genre}. {source_hint}\n"
@@ -1313,7 +1417,10 @@ def _normalize_ai_story(
     if len(beats) < 8:
         raise ValueError("AI story beats were incomplete after normalization.")
 
-    title = _clean(payload.get("title")) or f"English Story {sequence_index}"
+    language = story_language(source_entry)
+    title = _clean(payload.get("title")) or (
+        f"Русская история {sequence_index}" if language == "ru" else f"English Story {sequence_index}"
+    )
     short_title = _clean(payload.get("short_title")) or title
     hook = _clean(payload.get("hook")) or beats[0]["narration"]
     # The scheduler owns the content lane. Treat model-provided category text as
@@ -1327,6 +1434,8 @@ def _normalize_ai_story(
         "hook": hook,
         "category": category,
         "source_url": str(source_entry.get("source_url") or ""),
+        "account_profile": str(source_entry.get("account_profile") or ""),
+        "audience_language": language,
         "story_source": "openai_story_discovery",
         "beats": [_with_fallback_visual_for_story(beat, index, title=title, category=category) for index, beat in enumerate(beats, start=1)],
     }
@@ -1354,41 +1463,47 @@ def _with_opening_hook(story: dict[str, Any], *, sequence_index: int) -> dict[st
         return story
     first = dict(beats[0])
     narration = _clean(first.get("narration"))
-    if narration and not _starts_with_curiosity_hook(narration):
-        opener = HOOK_OPENERS[(max(1, sequence_index) - 1) % len(HOOK_OPENERS)]
+    language = story_language(story)
+    openers = RUSSIAN_HOOK_OPENERS if language == "ru" else HOOK_OPENERS
+    follow_cta = RUSSIAN_FOLLOW_CTA if language == "ru" else FOLLOW_CTA
+    if narration and not _starts_with_curiosity_hook(narration, language=language):
+        opener = openers[(max(1, sequence_index) - 1) % len(openers)]
         first["narration"] = f"{opener} {narration}"
         first["label"] = _clean(first.get("label") or "The Hook") or "The Hook"
     beats[0] = first
     last = dict(beats[-1])
     final_narration = _clean(last.get("narration"))
     normalized_final = _normalized_spoken_phrase(final_narration)
-    known_ctas = {
-        _normalized_spoken_phrase(FOLLOW_CTA),
-        _normalized_spoken_phrase(LEGACY_FOLLOW_CTA),
-    }
+    known_ctas = {_normalized_spoken_phrase(follow_cta)}
+    if language == "en":
+        known_ctas.add(_normalized_spoken_phrase(LEGACY_FOLLOW_CTA))
     if not any(cta and cta in normalized_final for cta in known_ctas):
-        last["narration"] = f"{final_narration} {FOLLOW_CTA}".strip()
+        last["narration"] = f"{final_narration} {follow_cta}".strip()
     beats[-1] = last
     enriched = dict(story)
     enriched["beats"] = beats
     return enriched
 
 
-def _starts_with_curiosity_hook(text: str) -> bool:
+def _starts_with_curiosity_hook(text: str, *, language: str = "en") -> bool:
     lowered = text.strip().lower()
     starters = (
-        "did you know",
-        "have you ever",
-        "have you heard",
-        "what if i told you",
-        "this sounds fake",
-        "you probably never",
+        ("ты знал", "ты знала", "ты когда-нибудь", "что, если", "что если", "звучит как выдумка", "об этой детали")
+        if language == "ru"
+        else (
+            "did you know",
+            "have you ever",
+            "have you heard",
+            "what if i told you",
+            "this sounds fake",
+            "you probably never",
+        )
     )
     return any(lowered.startswith(starter) for starter in starters)
 
 
 def _normalized_spoken_phrase(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(text or "").casefold()).strip()
+    return re.sub(r"[\W_]+", " ", str(text or "").casefold(), flags=re.UNICODE).strip()
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
@@ -2926,6 +3041,20 @@ def _poster_filters(story: dict[str, Any], beat: dict[str, str]) -> list[str]:
 
 def _story_badge(story: dict[str, Any]) -> str:
     category = str(story.get("category") or "").upper()
+    if story_language(story) == "ru":
+        if "COURT" in category or "LEGAL" in category or "LAWSUIT" in category:
+            return "СУДЕБНОЕ ДЕЛО"
+        if "CINEMA" in category or "FILM" in category:
+            return "ИСТОРИЯ КИНО"
+        if "ECONOMY" in category or "MARKET" in category:
+            return "ЭКОНОМИКА"
+        if "2D" in category or "ANIMATION" in category:
+            return "НОВАЯ ИСТОРИЯ"
+        if "MYSTERY" in category or "FOLKLORE" in category or "LEGEND" in category:
+            return "ТАЙНА ИСТОРИИ"
+        if "SURVIVAL" in category:
+            return "ИСТОРИЯ ВЫЖИВАНИЯ"
+        return "РЕАЛЬНАЯ ИСТОРИЯ"
     if "LAWSUIT" in category:
         return "LAWSUIT STORY"
     if "COURT" in category or "LEGAL" in category:
@@ -2952,7 +3081,8 @@ def _story_badge(story: dict[str, Any]) -> str:
 
 
 def _story_brand() -> str:
-    return os.getenv("TIKTOK_STORY_BRAND", "DAMN WHAT A CLIP").strip().upper() or "DAMN WHAT A CLIP"
+    value = os.getenv("TIKTOK_STORY_BRAND", "DAMN WHAT A CLIP").strip().replace("_", " ")
+    return value.upper() or "DAMN WHAT A CLIP"
 
 
 def _glitch_hook_filters() -> list[str]:

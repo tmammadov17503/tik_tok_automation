@@ -1,9 +1,14 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 from tiktok_automation import (
+    ACCOUNT_PROFILE_MAIN_RU,
+    AUTONOMOUS_RUSSIAN_SOURCE_URL,
     AutomationController,
+    CANONICAL_TIKTOK_HASHTAGS,
     PostQueueManager,
     english_story_hashtags,
     english_story_lane,
@@ -260,6 +265,99 @@ class EnglishStoryDistributionTests(unittest.TestCase):
         self.assertIn("#economics", caption)
         self.assertIn("#moneyhistory", caption)
         self.assertNotIn("#mysterytok", caption)
+
+
+class RussianOriginalStoryDistributionTests(unittest.TestCase):
+    def test_russian_original_story_keeps_required_hashtags_and_follow_cta(self) -> None:
+        controller = AutomationController.__new__(AutomationController)
+        controller.post_queue = type("Queue", (), {"default_hashtags": list(CANONICAL_TIKTOK_HASHTAGS)})()
+        item = {
+            "source_url": f"{AUTONOMOUS_RUSSIAN_SOURCE_URL}/test-r00",
+            "source_id": "source-ru",
+            "content_mode": "monetization",
+            "account_profile": "main_ru",
+            "audience_language": "ru",
+            "story_category": "cinema history",
+            "story_title": "Тайна старого кинотеатра",
+            "segment_excerpt": "Эту пленку никто не должен был увидеть.",
+        }
+
+        caption = controller._caption_hint_for_item(item)
+
+        self.assertIn("Подпишись", caption)
+        self.assertEqual(caption.splitlines()[-1].split()[:5], CANONICAL_TIKTOK_HASHTAGS)
+
+    def test_russian_story_delivery_uses_title_and_ai_label_note(self) -> None:
+        controller = AutomationController.__new__(AutomationController)
+        controller.post_queue = type("Queue", (), {"default_hashtags": list(CANONICAL_TIKTOK_HASHTAGS)})()
+        item = {
+            "source_url": f"{AUTONOMOUS_RUSSIAN_SOURCE_URL}/test-r00",
+            "source_title": "Original Russian Story Batch",
+            "content_mode": "monetization",
+            "account_profile": "main_ru",
+            "audience_language": "ru",
+            "story_category": "cinema history",
+            "story_title": "Тайна старого кинотеатра",
+            "segment_excerpt": "Эту пленку никто не должен был увидеть.",
+        }
+
+        message = controller._upload_delivery_message(item, "Monetization")
+
+        self.assertIn("Тайна старого кинотеатра", message)
+        self.assertIn("AI-generated content label", message)
+        self.assertNotIn("0/3", message)
+
+    def test_existing_russian_youtube_source_blocks_autonomous_batch_creation(self) -> None:
+        controller = AutomationController.__new__(AutomationController)
+        sources = [
+            {
+                "id": "youtube-source",
+                "source_url": "https://youtu.be/example",
+                "account_profile": ACCOUNT_PROFILE_MAIN_RU,
+                "audience_language": "ru",
+                "added_at": "2026-08-24T00:00:00Z",
+            }
+        ]
+        controller.sources = type("Sources", (), {"list_sources": lambda _self: list(sources)})()
+        controller._maybe_create_autonomous_source = lambda: self.fail("autonomous source must wait")
+
+        ordered = controller._ordered_sources()
+
+        self.assertEqual([item["id"] for item in ordered], ["youtube-source"])
+
+    def test_russian_autonomous_batch_uses_three_videos_and_continuous_rotation(self) -> None:
+        controller = AutomationController.__new__(AutomationController)
+
+        class Sources:
+            def __init__(self) -> None:
+                self.items: list[dict[str, object]] = []
+
+            def add_source(self, payload: dict[str, object]) -> None:
+                self.items.append(dict(payload, id="ru-original-source", added_at="2026-08-24T00:00:00Z"))
+
+            def list_sources(self) -> list[dict[str, object]]:
+                return list(self.items)
+
+        controller.sources = Sources()
+        controller.post_queue = type("Queue", (), {"list_items": lambda _self: []})()
+        controller.append_log = lambda _message: None
+        controller.notify = lambda _message: None
+        controller._active_account_profile = lambda: ACCOUNT_PROFILE_MAIN_RU
+
+        with patch.dict(
+            os.environ,
+            {
+                "TIKTOK_AUTONOMOUS_RUSSIAN_STORIES": "true",
+                "TIKTOK_RU_ORIGINAL_BATCH_SIZE": "3",
+            },
+            clear=False,
+        ):
+            created = controller._maybe_create_autonomous_source()
+
+        self.assertIsNotNone(created)
+        self.assertEqual(created["planned_clips"], 3)
+        self.assertTrue(str(created["source_url"]).startswith(AUTONOMOUS_RUSSIAN_SOURCE_URL))
+        self.assertEqual(created["audience_language"], "ru")
 
 
 if __name__ == "__main__":
