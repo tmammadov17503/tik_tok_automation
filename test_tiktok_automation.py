@@ -12,6 +12,7 @@ from tiktok_automation import (
     PostQueueManager,
     english_story_hashtags,
     english_story_lane,
+    is_youtube_download_blocker,
     story_item_identity_keys,
 )
 
@@ -88,6 +89,42 @@ class EnglishStoryDistributionTests(unittest.TestCase):
         )
 
         self.assertEqual(calls, [])
+
+    def test_youtube_reload_challenge_is_a_download_blocker(self) -> None:
+        self.assertTrue(
+            is_youtube_download_blocker(
+                "ERROR: [youtube] reDWpYU3UZw: The page needs to be reloaded.",
+                "https://youtu.be/reDWpYU3UZw",
+            )
+        )
+
+    def test_youtube_reload_challenge_parks_source_without_consuming_retry(self) -> None:
+        controller = AutomationController.__new__(AutomationController)
+        calls: list[tuple[str, str]] = []
+        controller.sources = type(
+            "Sources",
+            (),
+            {
+                "defer_source_failure": lambda _self, source_id, error: calls.append((source_id, error)),
+                "mark_source_failure": lambda _self, *_args, **_kwargs: self.fail(
+                    "A YouTube access challenge must not consume a source retry."
+                ),
+            },
+        )()
+        controller.append_log = lambda _message: None
+        controller.notify = lambda _message: None
+
+        controller._record_source_generation_failure(
+            {
+                "id": "youtube-source",
+                "title": "Queued YouTube source",
+                "source_url": "https://youtu.be/reDWpYU3UZw",
+            },
+            RuntimeError("ERROR: [youtube] reDWpYU3UZw: The page needs to be reloaded."),
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "youtube-source")
 
     def test_story_category_and_hashtags_survive_queueing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

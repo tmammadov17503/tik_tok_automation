@@ -401,6 +401,7 @@ def is_youtube_download_blocker(error: str, source_url: str = "") -> bool:
     blockers = (
         "sign in to confirm",
         "not a bot",
+        "page needs to be reloaded",
         "youtube blocked the download request",
         "cookies",
         "n challenge solving failed",

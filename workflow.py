@@ -759,6 +759,7 @@ def yt_dlp_error_summary(completed: subprocess.CompletedProcess[str]) -> str:
         "error:",
         "sign in to confirm",
         "not a bot",
+        "page needs to be reloaded",
         "n challenge",
         "po token",
         "requested format is not available",
@@ -776,6 +777,7 @@ def is_youtube_bot_error(completed: subprocess.CompletedProcess[str]) -> bool:
     return (
         "sign in to confirm you’re not a bot" in combined
         or "sign in to confirm you're not a bot" in combined
+        or "page needs to be reloaded" in combined
         or "http error 429" in combined
     )
 
