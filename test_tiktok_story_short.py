@@ -1,7 +1,10 @@
+import json
 import os
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import tiktok_story_short as story
@@ -598,5 +601,157 @@ class StoryCaptionLayoutTests(unittest.TestCase):
 
             self.assertFalse(decision.allowed)
             self.assertIn(decision.reason, {"pipeline_weekly_budget", "shared_weekly_budget"})
+
+
+class StoryEventIdentityTests(unittest.TestCase):
+    EVENT_ID = "alpha-v-beta-san-jose-2023-sanctions"
+
+    def candidate(self, **changes: Any) -> dict[str, Any]:
+        return {
+            "slug": "synthetic-first-case",
+            "title": "A Synthetic Court Story",
+            "short_title": "COURT STORY",
+            "hook": "Alpha challenged the evidence.",
+            "event_id": self.EVENT_ID,
+            "beats": [
+                {"label": str(i), "narration": f"Synthetic case beat {i}.", "onscreen_text": "THE CASE"}
+                for i in range(8)
+            ],
+            **changes,
+        }
+
+    def normalize(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return story._normalize_ai_story(payload, source_entry={}, sequence_index=4, genre="court case")
+
+    def test_event_identity_normalizes_without_replacing_legacy_keys(self) -> None:
+        candidate = self.candidate(event_id="  ALPHA v. BETA / San_Jose / 2023 / Sanctions  ")
+        normalized = self.normalize(candidate)
+        self.assertEqual(normalized["event_id"], self.EVENT_ID)
+        keys = story.story_identity_keys(candidate)
+        legacy = {key: value for key, value in candidate.items() if key != "event_id"}
+        self.assertEqual(keys, story.story_identity_keys(legacy) | {f"event:{self.EVENT_ID}"})
+        self.assertNotEqual(candidate["event_id"], normalized["event_id"])
+
+    def test_event_identity_preserves_unicode_and_canonical_equivalence(self) -> None:
+        pairs = [
+            ("Affaire E\u0301lodie / Rene\u0301 / Paris / 2023", "affaire-\u00e9lodie-ren\u00e9-paris-2023"),
+            ("\u041f\u043e\u0436\u0430\u0440 / \u041c\u043e\u0441\u043a\u0432\u0430 / 1812", "\u043f\u043e\u0436\u0430\u0440-\u043c\u043e\u0441\u043a\u0432\u0430-1812"),
+        ]
+        for raw, expected in pairs:
+            with self.subTest(raw=raw):
+                self.assertEqual(self.normalize(self.candidate(event_id=raw))["event_id"], expected)
+                self.assertEqual(story.story_identity_keys({"event_id": raw}), {f"event:{expected}"})
+        self.assertNotEqual(story.story_identity_keys({"event_id": pairs[0][1]}),
+                            story.story_identity_keys({"event_id": "affaire-elodie-rene-paris-2023"}))
+
+    def test_invalid_optional_event_ids_do_not_create_identities(self) -> None:
+        for value in (None, False, 2023, [], {}, "", "   ", "---", "unknown", "N/A",
+                      "court-case", "history-story-2023", "ai-court-case-2023", "event-123",
+                      "2023-2024-2025", "a-b-2023", "placeholder-event-id", "x" * 161,
+                      self.EVENT_ID + "-" + "x" * 161, "alpha\x00beta-san-jose-2023"):
+            with self.subTest(value=value):
+                self.assertEqual(story.story_identity_keys({"event_id": value}), set())
+                self.assertFalse(self.normalize(self.candidate(event_id=value)).get("event_id"))
+        legacy = {k: v for k, v in self.candidate().items() if k != "event_id"}
+        self.assertFalse(self.normalize(legacy).get("event_id"))
+
+    def test_event_id_length_limit_never_truncates_distinct_ids(self) -> None:
+        boundary = "alpha-beta-" + "x" * (story.MAX_STORY_EVENT_ID_LENGTH - len("alpha-beta-"))
+        self.assertEqual(story.story_identity_keys({"event_id": boundary}), {f"event:{boundary}"})
+        for overlong in (boundary + "y", "alpha-beta-" + "\u00df" * 80):
+            with self.subTest(overlong=overlong):
+                self.assertEqual(story.story_identity_keys({"event_id": overlong}), set())
+
+    def test_only_bare_generic_hooks_are_ignored(self) -> None:
+        for opener in [*story.HOOK_OPENERS, *story.RUSSIAN_HOOK_OPENERS, "Did you know?",
+                       "Have you heard this story?", "What if I told you?"]:
+            with self.subTest(opener=opener):
+                bare = "  " + opener.upper().replace("?", "!!!") + "  "
+                self.assertEqual(story.story_identity_keys({"hook": bare}), set())
+                specific = {"hook": opener + " Alpha challenged the evidence."}
+                self.assertTrue(any(key.startswith("hook:") for key in story.story_identity_keys(specific)))
+        self.assertEqual(story.story_identity_keys({"title": "Legacy Title", "slug": "legacy-slug", "hook": "Did you know?"}),
+                         {"title:legacy title", "slug:legacy-slug"})
+
+    def test_prompt_requests_specific_event_in_existing_discovery(self) -> None:
+        prompt = story._ai_story_prompt({}, sequence_index=4, genre="court case").lower()
+        for required in ("event_id", "canonical", "parties", "place", "year", "fiction", "empty string"):
+            self.assertIn(required, prompt)
+
+    def test_event_prompt_priority_and_generic_hook_filter(self) -> None:
+        seen = {f"title:prior title {i:03}" for i in range(70)} | {f"event:{self.EVENT_ID}"}
+        values = story._excluded_story_prompt_values(seen)
+        self.assertEqual(values[0], self.EVENT_ID)
+        self.assertEqual(len(values), 60)
+        self.assertEqual(story._excluded_story_prompt_values({"hook:did you know this actually happened", "event:unknown"}), [])
+        self.assertEqual(story._excluded_story_prompt_values(seen, limit=0), [])
+
+    def test_exact_event_is_rejected_even_when_omitted_from_prompt(self) -> None:
+        old = self.candidate(event_id="zulu-v-beta-san-jose-2023-sanctions")
+        seen = story.story_identity_keys(old) | {f"event:alpha-case-{i:03}-london-2023" for i in range(70)}
+        seen |= {f"title:prior title {i:03}" for i in range(70)}
+        repeated = self.candidate(event_id=old["event_id"], slug="changed-slug", title="Changed Title", hook="A changed hook.")
+        fresh = self.candidate(event_id="gamma-v-delta-london-2024", slug="fresh-case", title="Fresh Title", hook="A fresh hook.")
+        self.assertNotIn(old["event_id"], story._excluded_story_prompt_values(seen))
+        with (
+            patch.object(story, "_ai_story_discovery_enabled", return_value=True),
+            patch.object(story, "_build_ai_story", side_effect=[repeated, fresh]) as build,
+        ):
+            selected, index = story._select_unseen_story({}, sequence_index=4, excluded_story_keys=seen)
+        self.assertEqual(selected["event_id"], fresh["event_id"])
+        self.assertEqual((build.call_count, index), (2, 4))
+        self.assertEqual(build.call_args.kwargs["excluded_story_keys"], seen)
+
+    def test_distinct_events_and_title_only_suspicions_are_allowed(self) -> None:
+        old = self.candidate(title="The Court Case That Shook AI Trust Forever", hook=story.HOOK_OPENERS[0])
+        for event_id in ("gamma-v-delta-london-2024", "alpha-v-beta-san-jose-2024-appeal", ""):
+            fresh = self.candidate(event_id=event_id, title="The Court Case That Upended AI Trust Forever",
+                                   slug="another-case", hook=story.HOOK_OPENERS[0])
+            with (
+                self.subTest(event_id=event_id),
+                patch.object(story, "_ai_story_discovery_enabled", return_value=True),
+                patch.object(story, "_build_ai_story", return_value=fresh) as build,
+            ):
+                selected, _ = story._select_unseen_story({}, sequence_index=4, excluded_story_keys=story.story_identity_keys(old))
+                self.assertEqual(selected["slug"], "another-case")
+                self.assertEqual(build.call_count, 1)
+        presidents = [topic for topic in story.TOPIC_LIBRARY if topic["slug"] in
+                      {"sankara-1987-burkina-faso", "allende-1973-chile"}]
+        self.assertEqual(len(presidents), 2)
+        self.assertFalse(story.story_identity_keys(presidents[0]) & story.story_identity_keys(presidents[1]))
+
+    def test_discovery_preserves_event_without_an_additional_request(self) -> None:
+        with (
+            patch.object(story, "_ai_story_discovery_enabled", return_value=True),
+            patch.object(story, "_request_ai_story_payload", return_value=self.candidate()) as request,
+        ):
+            selected, _ = story._select_unseen_story({}, sequence_index=4)
+        self.assertEqual(selected["event_id"], self.EVENT_ID)
+        request.assert_called_once()
+
+    def test_event_id_survives_story_and_segment_serialization(self) -> None:
+        for event_id in (self.EVENT_ID, "unknown", None):
+            with self.subTest(event_id=event_id):
+                self.assert_serialized_event_id(event_id)
+
+    def assert_serialized_event_id(self, event_id: Any) -> None:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as mocks:
+            candidate = self.normalize(self.candidate(event_id=event_id))
+            for name, value in (
+                ("_select_unseen_story", (candidate, 4)), ("_generate_story_voiceover", {}),
+                ("_generate_story_word_alignment", {"words": [{"text": "Synthetic", "start": 0, "end": 1}]}),
+                ("_write_story_caption_ass", None),
+                ("_write_caption_manifest", None), ("render_story_video", None),
+                ("validate_story_video_layout", Path(tmp) / "validation.json"), ("_media_duration", 70.0),
+            ):
+                mocks.enter_context(patch.object(story, name, return_value=value))
+            result = story.generate_tiktok_story_clip(Path(tmp), {}, sequence_index=4)
+            saved_story = json.loads(result.story_path.read_text(encoding="utf-8"))
+            saved_segments = json.loads(result.segments_path.read_text(encoding="utf-8"))
+        expected = self.EVENT_ID if event_id == self.EVENT_ID else ""
+        self.assertEqual(saved_story["event_id"], expected)
+        self.assertEqual(saved_segments[0]["story_event_id"], expected)
+
+
 if __name__ == "__main__":
     unittest.main()

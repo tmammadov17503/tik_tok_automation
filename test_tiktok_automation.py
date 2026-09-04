@@ -304,6 +304,26 @@ class EnglishStoryDistributionTests(unittest.TestCase):
         self.assertNotIn("#mysterytok", caption)
 
 
+class StoryEventPersistenceTests(unittest.TestCase):
+    def test_event_identity_survives_queue_reload_and_prevents_retitled_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clip = root / "story.mp4"
+            clip.write_bytes(b"test media")
+            source = dict(id="source-a", source_url="story://english/a",
+                          account_profile="future_en", audience_language="en", content_mode="monetization")
+            segment = dict(story_title="A Court Case", story_slug="first-title",
+                           story_event_id="us-mata-avianca-sanctions-2023", excerpt="A judge found invented precedents.")
+            queue = PostQueueManager(root, [])
+            queue.enqueue_clip_files(source, [clip], segments=[segment])
+            reloaded = PostQueueManager(root, [])
+            self.assertEqual(reloaded.list_items()[0].get("story_event_id"), segment["story_event_id"])
+            self.assertIn("event:us-mata-avianca-sanctions-2023", story_item_identity_keys(reloaded.list_items()[0]))
+            duplicate = dict(segment, story_title="The Judge Discovered The Truth", story_slug="new-slug",
+                             excerpt="The citations did not exist.")
+            self.assertEqual(reloaded.enqueue_clip_files(dict(source, id="source-b"), [clip], segments=[duplicate]), [])
+
+
 class RussianOriginalStoryDistributionTests(unittest.TestCase):
     def test_russian_original_story_keeps_required_hashtags_and_follow_cta(self) -> None:
         controller = AutomationController.__new__(AutomationController)

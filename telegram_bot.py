@@ -14,10 +14,11 @@ from urllib.request import Request, urlopen
 
 YOUTUBE_URL_PATTERN = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s<>()]+", re.IGNORECASE)
 TRUE_VALUES = {"1", "true", "yes", "on"}
-BOT_COMMANDS_VERSION = "2026-07-09.autonomous-english-stories"
+BOT_COMMANDS_VERSION = "2026-09-04.queue-health"
 BOT_COMMANDS = [
     {"command": "start", "description": "Connect this chat and show help"},
     {"command": "status", "description": "Show automation and inbox counts"},
+    {"command": "inbox", "description": "List videos waiting in the TikTok inbox"},
     {"command": "queue", "description": "Show queued YouTube links and progress"},
     {"command": "moneyru", "description": "Queue RU monetization videos for main account"},
     {"command": "moneyen", "description": "Queue EN monetization videos for English account"},
@@ -37,6 +38,7 @@ BOT_COMMANDS = [
 BOT_COMMANDS_SIMPLE = [
     {"command": "start", "description": "Connect this chat and show help"},
     {"command": "status", "description": "Show automation and inbox counts"},
+    {"command": "inbox", "description": "List stories waiting in the TikTok inbox"},
     {"command": "queue", "description": "Show autonomous story batch progress"},
     {"command": "clips", "description": "Show recent clip labels"},
     {"command": "performance", "description": "Show recent TikTok performance"},
@@ -291,6 +293,9 @@ class TelegramBotService:
         if command == "/status":
             self._send_message(token, chat_id, self._status_text())
             return
+        if command == "/inbox":
+            self._send_message(token, chat_id, self.automation.inbox_summary_text())
+            return
         if command == "/queue":
             self._send_message(token, chat_id, self._queue_text())
             return
@@ -491,6 +496,7 @@ class TelegramBotService:
                 "English story mode is autonomous now: no link is required.\n"
                 "I pick story, history, mystery, horror folklore, and strange-event topics myself, then make 8 English 60s+ monetization videos per batch.\n\n"
                 "/status - current automation counts\n"
+                "/inbox - titles still waiting in TikTok\n"
                 "/queue - autonomous batch and clip progress\n"
                 "/clips - recent clip labels\n"
                 "/performance - recent views and like-rate summary\n"
@@ -508,6 +514,7 @@ class TelegramBotService:
             "Use /money <YouTube link> for the same default monetization queue if you want to be explicit.\n"
             "Use /moneyru or /moneyen only when you want to override the target account.\n\n"
             "/status - current automation counts\n"
+            "/inbox - videos still waiting in TikTok\n"
             "/queue - source links and clip progress\n"
             "/moneyru <link> - queue RU 60s+ monetization videos\n"
             "/moneyen <link> - queue EN 60s+ monetization videos\n"
@@ -533,11 +540,13 @@ class TelegramBotService:
             f"Next run: {status.get('next_run_at') or 'not scheduled'}",
             f"Queue: {counts.get('pending', 0)} pending, {counts.get('making', 0)} making/queued, {counts.get('inbox', 0)} in inbox, {counts.get('posted', 0)} posted, {counts.get('failed', 0)} failed",
             f"Monetization mode: {counts.get('monetization_inbox', 0)} in inbox, {counts.get('monetization_posted', 0)} posted",
-            f"TikTok inbox API usage: {status.get('tiktok_remote_pending', 0)}/{status.get('tiktok_pending_cap', 0)}",
+            f"TikTok pending backlog limit: {status.get('tiktok_remote_pending', 0)}/{status.get('tiktok_pending_cap', 0)}",
             str(status.get("performance_summary") or ""),
         ]
         if status.get("last_error"):
             lines.append(f"Last issue: {status['last_error']}")
+        if status.get("waiting_reason"):
+            lines.append(f"Waiting: {status['waiting_reason']}")
         return "\n".join(lines)
 
     def _queue_text(self) -> str:

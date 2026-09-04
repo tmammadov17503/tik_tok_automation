@@ -254,6 +254,7 @@ def story_item_identity_keys(item: dict[str, Any]) -> set[str]:
             "slug": item.get("story_slug") or "",
             "title": item.get("story_title") or "",
             "hook": item.get("segment_excerpt") or "",
+            "event_id": item.get("story_event_id") or "",
         }
     )
 
@@ -611,9 +612,11 @@ class PostQueueManager:
                 story_title = str(segment.get("story_title") or "").strip()
                 story_short_title = str(segment.get("story_short_title") or "").strip()
                 story_slug = str(segment.get("story_slug") or "").strip()
+                story_event_id = str(segment.get("story_event_id") or "").strip()
                 candidate_story_keys = story_item_identity_keys(
                     {
                         "story_slug": story_slug,
+                        "story_event_id": story_event_id,
                         "story_title": story_title,
                         "segment_excerpt": segment.get("excerpt") or "",
                     }
@@ -653,6 +656,7 @@ class PostQueueManager:
                         "story_title": story_title,
                         "story_short_title": story_short_title,
                         "story_slug": story_slug,
+                        "story_event_id": story_event_id,
                         "status": "pending",
                         "hashtags": hashtags,
                         "created_at": now,
@@ -778,6 +782,7 @@ class PostQueueManager:
             "story_title": str(item.get("story_title") or ""),
             "story_short_title": str(item.get("story_short_title") or ""),
             "story_slug": str(item.get("story_slug") or ""),
+            "story_event_id": str(item.get("story_event_id") or ""),
             "status": str(item.get("status") or "pending"),
             "publish_id": str(item.get("publish_id") or ""),
             "tiktok_status": str(item.get("tiktok_status") or ""),
@@ -1995,11 +2000,71 @@ class AutomationController:
                 "last_recorded": safe_int(state.get("last_metrics_sync_recorded"), 0),
             },
             "running": self._running.locked(),
+            "waiting_reason": self.generation_wait_reason(),
             "tiktok_pending_cap": self.max_pending_shares,
             "tiktok_remote_pending": remote_pending_count,
             "can_upload_more_to_tiktok": remote_pending_count < self.max_pending_shares,
             "draft_only": "video.publish" not in str(auth_status.get("token_scope") or ""),
         }
+
+    def generation_wait_reason(self) -> str:
+        pending = self.post_queue.remote_pending_count()
+        if pending >= self.max_pending_shares:
+            return (
+                f"TikTok inbox backlog is full ({pending}/{self.max_pending_shares}). "
+                "Publish a waiting video from TikTok's inbox; /inbox lists the titles. "
+                "Generation resumes on the next scheduled run after posting is confirmed."
+            )
+        sources = sorted(
+            (source for source in self.sources.list_sources()
+             if normalize_account_profile(source.get("account_profile")) == self._active_account_profile()),
+            key=lambda source: (str(source.get("added_at") or ""), str(source.get("id") or "")),
+        )
+        delivered = False
+        for source in sources:
+            if source.get("status") in {"parked", "failed", "skipped"}:
+                continue
+            if self._source_delivery_complete(source):
+                delivered = True
+                continue
+            if any(item.get("status") in GENERATION_BLOCKING_STATES
+                   for item in self.post_queue.items_for_source(str(source.get("id") or ""))):
+                return "Waiting for the current clip's upload/processing to finish. No duplicate will be generated."
+            return ""
+        if delivered:
+            return "All queued source clips are delivered. Unposted videos remain in TikTok's inbox; /inbox lists them."
+        if any(source.get("status") == "parked" for source in sources):
+            return "Source access needs attention. The source is parked, not lost; /queue shows the reason."
+        return ""
+
+    def inbox_summary_text(self) -> str:
+        items = sorted(
+            (item for item in self.post_queue.list_items() if item.get("status") == "sent_to_inbox"),
+            key=lambda item: str(item.get("inbox_delivered_at") or item.get("created_at") or ""),
+        )
+        if not items:
+            return "No videos are currently confirmed as waiting in TikTok's inbox."
+        lines = [f"TikTok inbox: {len(items)} waiting (according to TikTok's latest status)."]
+        for item in items[:10]:
+            delivered_at = str(item.get("inbox_delivered_at") or "unknown")
+            lines.append(f"- {clip_display_name(item)} | delivered {delivered_at}")
+        if len(items) > 10:
+            lines.append(f"...and {len(items) - 10} more.")
+        lines.append("Open TikTok inbox notifications to finish posting. A delivered video is not yet a published video.")
+        return "\n".join(lines)
+
+    def _notify_generation_wait(self) -> None:
+        reason = self.generation_wait_reason()
+        if not reason:
+            return
+        with self._lock:
+            state = self._read_state()
+            last_notice = iso_to_datetime(str(state.get("last_wait_notice_at") or ""))
+            if (state.get("last_wait_notice_reason") == reason and last_notice is not None
+                    and datetime.now(timezone.utc) - last_notice < timedelta(hours=24)):
+                return
+            self._write_state({**state, "last_wait_notice_reason": reason, "last_wait_notice_at": utc_now()})
+        self.notify(f"Automation is waiting, not stopped. {reason}")
 
     def source_progress(self, source_id: str) -> dict[str, Any]:
         source_entry = next((item for item in self.sources.list_sources() if item.get("id") == source_id), None)
@@ -3001,6 +3066,17 @@ class AutomationController:
         )
         return posted >= planned and not active_left
 
+    def _source_delivery_complete(self, source_entry: dict[str, Any]) -> bool:
+        planned = safe_int(source_entry.get("planned_clips"), 0)
+        if planned <= 0:
+            return False
+        items = self.post_queue.items_for_source(str(source_entry.get("id") or ""))
+        if any(item.get("status") in GENERATION_BLOCKING_STATES for item in items):
+            return False
+        inbox_ids = {str(item.get("id")) for item in items
+                     if item.get("id") and item.get("status") == "sent_to_inbox"}
+        return safe_int(source_entry.get("posted_clips"), 0) + len(inbox_ids) >= planned
+
     def _current_sequence_source(self) -> dict[str, Any] | None:
         for source_entry in self._ordered_sources():
             if source_entry.get("status") in {"failed", "skipped", "parked"}:
@@ -3008,14 +3084,22 @@ class AutomationController:
             if self._source_is_finished(source_entry):
                 self._maybe_finalize_source(str(source_entry.get("id") or ""))
                 continue
+            # Delivery completes production order; publication still owns counters and cleanup.
+            if self._source_delivery_complete(source_entry):
+                continue
             if self._maybe_retire_weak_source(source_entry):
                 continue
             return source_entry
         return None
 
     def _generate_from_next_source(self) -> None:
+        if self.post_queue.remote_pending_count() >= self.max_pending_shares:
+            self.append_log(self.generation_wait_reason())
+            self._notify_generation_wait()
+            return
         source_entry = self._pick_source_for_generation()
         if source_entry is None:
+            self._notify_generation_wait()
             return
 
         source_id = str(source_entry.get("id") or "")

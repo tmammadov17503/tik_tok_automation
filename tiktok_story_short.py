@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +66,12 @@ POSTER_MIN_FONT_SIZE = 54
 
 AI_STORY_DISABLED_VALUES = {"0", "false", "no", "off"}
 MAX_AI_STORY_CANDIDATES = 3
+MAX_STORY_EVENT_ID_LENGTH = 160
+GENERIC_EVENT_ID_WORDS = frozenset(
+    "a an and at by for from in of on the to with v vs versus ai case court event generic "
+    "history historical id lawsuit mystery new none null original person parties place placeholder "
+    "story tbd test topic true unknown untitled year".split()
+)
 # One 24-video strategy cycle: 50% history/mystery, 25% legal,
 # and 25% controlled experiments across the remaining requested niches.
 GENRE_ROTATION = [
@@ -151,6 +158,13 @@ RUSSIAN_HOOK_OPENERS = [
     "Звучит как выдумка, но это случилось.",
     "Об этой детали почти никто не знает.",
 ]
+GENERIC_STORY_HOOKS = frozenset(
+    re.sub(r"[\W_]+", " ", opener.casefold(), flags=re.UNICODE).strip()
+    for opener in (
+        *HOOK_OPENERS, *RUSSIAN_HOOK_OPENERS,
+        "Did you know?", "Have you heard this story?", "What if I told you?",
+    )
+)
 AUTONOMOUS_RUSSIAN_SOURCE_URL = "story://autonomous-russian-originals"
 
 
@@ -987,6 +1001,7 @@ def generate_tiktok_story_clip(
             "story_title": story.get("title") or "",
             "story_short_title": story.get("short_title") or "",
             "story_slug": story.get("slug") or "",
+            "story_event_id": _normalize_story_event_id(story.get("event_id")),
             "reason": f"Original {language_label} story reel generated for the autonomous story account.",
         }
     ]
@@ -1057,14 +1072,36 @@ def build_story(
     )
 
 
+def _normalize_story_event_id(value: Any) -> str:
+    if not isinstance(value, str) or not 1 <= len(value.strip()) <= MAX_STORY_EVENT_ID_LENGTH:
+        return ""
+    text = unicodedata.normalize("NFKC", value.strip()).casefold()
+    if any(unicodedata.category(char).startswith("C") for char in text):
+        return ""
+    # Preserve letters and combining marks; do not transliterate names or truncate IDs.
+    separated = "".join(char if unicodedata.category(char)[0] in "LMN" else "-" for char in text)
+    normalized = re.sub(r"-+", "-", separated).strip("-")
+    tokens = normalized.split("-")
+    distinctive = {
+        token for token in tokens
+        if len(token) > 1 and any(char.isalpha() for char in token) and token not in GENERIC_EVENT_ID_WORDS
+    }
+    if len(normalized) > MAX_STORY_EVENT_ID_LENGTH or len(tokens) < 3 or len(distinctive) < 2:
+        return ""
+    return normalized
+
+
 def story_identity_keys(story: dict[str, Any]) -> set[str]:
     keys: set[str] = set()
+    event_id = _normalize_story_event_id(story.get("event_id"))
     slug = re.sub(r"[^a-z0-9]+", "-", str(story.get("slug") or "").casefold()).strip("-")
     hook = re.sub(r"[\W_]+", " ", str(story.get("hook") or "").casefold(), flags=re.UNICODE).strip()
     title = re.sub(r"[\W_]+", " ", str(story.get("title") or "").casefold(), flags=re.UNICODE).strip()
+    if event_id:
+        keys.add(f"event:{event_id}")
     if slug:
         keys.add(f"slug:{slug}")
-    if hook:
+    if hook and hook not in GENERIC_STORY_HOOKS:
         keys.add(f"hook:{hook}")
     if title:
         keys.add(f"title:{title}")
@@ -1316,6 +1353,15 @@ def _ai_story_prompt(
         if excluded_topics
         else ""
     )
+    event_note = (
+        "- Optional event_id: a stable canonical ID for the specific named factual event. Include the named "
+        "parties or people, specific event or ruling, place, and year when known, in a consistent order. "
+        "Use lowercase hyphen-separated words, at least two distinctive name/event words, and at most "
+        f"{MAX_STORY_EVENT_ID_LENGTH} characters. Keep the same ID for retellings despite title or hook changes; "
+        "distinguish separate events involving the same person or parties. Do not use a broad topic, genre, "
+        "clickbait title, sequence number, or generic placeholder. Use an empty string for fiction, "
+        "folklore, or uncertain identity; do not invent identifying facts.\n"
+    )
     if language == "ru":
         return (
             "Create one fresh vertical short story for Russian TikTok growth and original-content monetization.\n"
@@ -1327,6 +1373,7 @@ def _ai_story_prompt(
             "Do not summarize copyrighted films, TV episodes, or franchise plots, and do not use copyrighted characters.\n"
             f"{exclusion_note}"
             "Requirements:\n"
+            f"{event_note}"
             "- 8 beats exactly; each narration is 16 to 27 spoken Russian words.\n"
             "- Total narration should run 60 to 75 seconds and end with a satisfying reveal or takeaway.\n"
             "- Begin with a natural Russian curiosity hook such as: Ты знал...? / Ты когда-нибудь слышал...? / Что, если я скажу...?\n"
@@ -1335,7 +1382,7 @@ def _ai_story_prompt(
             "- No graphic gore, current crime allegations, political persuasion, or reused social-media posts.\n"
             "- Onscreen text is 2 to 5 short Russian words.\n"
             "- Every visual is a concrete English comic-panel prompt with setting, characters, action, props, and mood.\n"
-            "Return JSON with keys: slug, title, short_title, hook, category, beats. "
+            "Return JSON with keys: slug, event_id, title, short_title, hook, category, beats. "
             "beats is an array of objects with label, narration, onscreen_text, visual, palette, motion."
         )
     return (
@@ -1347,6 +1394,7 @@ def _ai_story_prompt(
         f"Do not reuse these fallback examples directly: {previous_topics}.\n"
         f"{exclusion_note}"
         "Requirements:\n"
+        f"{event_note}"
         "- 8 beats exactly.\n"
         "- Each beat narration is 16 to 27 spoken words, simple and punchy.\n"
         "- Total script should feel like a 60 to 75 second story.\n"
@@ -1360,20 +1408,24 @@ def _ai_story_prompt(
         "- Onscreen text must be 2 to 5 words, bold, emotional, and safe for TikTok.\n"
         "- Each beat must include visual: one concrete comic-panel scene description, with setting, character/action, props, and mood.\n"
         "- Each beat may include palette: 3 to 5 color/mood words.\n"
-        "Return JSON with keys: slug, title, short_title, hook, category, beats. "
+        "Return JSON with keys: slug, event_id, title, short_title, hook, category, beats. "
         "beats is an array of objects with label, narration, onscreen_text, visual, palette."
     )
 
 
 def _excluded_story_prompt_values(excluded_story_keys: set[str] | None, *, limit: int = 60) -> list[str]:
+    if limit <= 0:
+        return []
     values: list[str] = []
     keys = {str(key) for key in excluded_story_keys or set()}
-    for wanted_prefix in ("title", "slug", "hook"):
+    for wanted_prefix in ("event", "title", "slug", "hook"):
         for key in sorted(keys):
             prefix, separator, value = key.partition(":")
             if not separator or prefix != wanted_prefix:
                 continue
-            cleaned = value.strip()
+            cleaned = _normalize_story_event_id(value) if prefix == "event" else value.strip()
+            if prefix == "hook" and _normalized_spoken_phrase(cleaned) in GENERIC_STORY_HOOKS:
+                continue
             if cleaned and cleaned not in values:
                 values.append(cleaned)
             if len(values) >= limit:
@@ -1429,6 +1481,7 @@ def _normalize_ai_story(
     slug = _safe_name(_clean(payload.get("slug")) or f"{genre}-{sequence_index}").lower()
     return {
         "slug": slug,
+        "event_id": _normalize_story_event_id(payload.get("event_id")),
         "title": _one_line(title, 72),
         "short_title": _one_line(short_title.upper(), 28),
         "hook": hook,
