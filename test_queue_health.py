@@ -139,6 +139,7 @@ class QueueHealthTests(unittest.TestCase):
         controller._generate_from_next_source = Mock()
         controller._sync_public_video_metrics = Mock()
         controller._run_cycle(forced=False)
+        controller._refresh_remote_statuses.assert_not_called()
         controller._generate_from_next_source.assert_not_called()
         controller._sync_public_video_metrics.assert_not_called()
         self.assertFalse(controller._running.locked())

@@ -2440,14 +2440,11 @@ class AutomationController:
             if not forced:
                 if not state.get("enabled"):
                     return
-
-            status_updates = self._refresh_remote_statuses()
-
-            if not forced:
                 next_run_at = iso_to_datetime(str(state.get("next_run_at") or ""))
                 if next_run_at and next_run_at > datetime.now(timezone.utc):
                     return
 
+            status_updates = self._refresh_remote_statuses()
             self._sync_public_video_metrics()
 
             if status_updates:
